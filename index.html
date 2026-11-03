@@ -101,6 +101,15 @@
     <form id="auth-form" class="auth-form"><label>Username<input id="auth-username" minlength="3" maxlength="24" autocomplete="username" required pattern="[A-Za-z0-9_]+" placeholder="Your unique name"></label><label>Password<input id="auth-password" type="password" minlength="8" autocomplete="current-password" required placeholder="At least 8 characters"></label><button class="button button-primary full" id="auth-submit" type="submit">Create account →</button></form>
     <p id="auth-message" class="auth-message" aria-live="polite"></p><p class="micro-note">Prototype accounts: use a unique username and a strong password.</p>
   </dialog>
+  <dialog id="account-dialog" class="modal account-modal">
+    <form method="dialog" class="modal-close"><button aria-label="Close">×</button></form>
+    <div class="modal-mark">A</div><span class="eyebrow">ACCOUNT SECURITY</span>
+    <h2>Active sessions</h2>
+    <p class="modal-sub">Your session expires after 7 days of inactivity or 30 days after sign-in, whichever comes first.</p>
+    <div id="sessions-list" class="sessions-list"><div class="empty">Loading active sessions…</div></div>
+    <div class="session-policy-note">Revoking a device signs it out immediately. Logging out below revokes this device's session.</div>
+    <button id="logout-button" class="button button-primary full" type="button">Log out this device</button>
+  </dialog>
   <div id="toast" role="status" class="toast"></div>
   <script src="./app.js"></script>
 </body>

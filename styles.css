@@ -37,3 +37,16 @@
 .craft-button:disabled{opacity:.35;cursor:not-allowed;filter:saturate(.3);box-shadow:none;transform:none}
 @media(max-width:850px){.game-tools-grid{grid-template-columns:1fr}}
 @media(max-width:480px){.add-item-row{grid-template-columns:.65fr 1.35fr;gap:8px}.add-item-button{padding:10px 8px;font-size:10px}.craft-recipe-action{margin-left:0}.inventory-item{gap:7px}}
+
+/* Account security and active session manager */
+.account-modal{width:min(560px,94vw);max-height:85vh;overflow:auto}
+.sessions-list{display:flex;flex-direction:column;gap:10px;margin:18px 0}
+.session-row{display:flex;align-items:center;gap:14px;justify-content:space-between;padding:13px;background:#0d131c;border:1px solid #293443;border-radius:9px}
+.session-details{min-width:0;display:flex;flex-direction:column;gap:6px}
+.session-details strong{font-size:12px;color:#e7ecf5}
+.session-details small{font:10px/1.5 'DM Mono',monospace;color:#8290a3;overflow-wrap:anywhere}
+.current-session{font:9px 'DM Mono';letter-spacing:.08em;color:#79dfad;background:#19372e;border-radius:4px;padding:3px 5px;margin-left:5px}
+.session-current-label{font-size:10px;color:#78d8a8;white-space:nowrap}
+.revoke-session{padding:8px 11px;font-size:10px;flex-shrink:0}
+.session-policy-note{font-size:10px;line-height:1.6;color:#758398;margin:7px 0 12px}
+@media(max-width:480px){.session-row{align-items:flex-start;flex-direction:column}.revoke-session{align-self:flex-end}}

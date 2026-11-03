@@ -1,8 +1,10 @@
 // All Contribute frontend prototype.
 const API_BASE = "https://all-contrib.all-contrib.workers.dev";
 const $ = (id) => document.getElementById(id);
-let token = localStorage.getItem("ac_token");
 let username = localStorage.getItem("ac_username");
+let authenticated = false;
+// Remove the old JavaScript-readable bearer token. Authentication now uses an HttpOnly cookie.
+localStorage.removeItem("ac_token");
 let authMode = "register";
 let toastTimer;
 let currentBlocks = [];
@@ -46,41 +48,131 @@ function toast(message, error=false) {
   clearTimeout(toastTimer); toastTimer=setTimeout(()=>el.className="toast",3200);
 }
 async function api(path, options={}) {
-  const headers={"Content-Type":"application/json",...(options.headers||{})};
-  if(token) headers.Authorization=`Bearer ${token}`;
+  const headers={"Content-Type":"application/json","X-AC-Request":"1",...(options.headers||{})};
   let response;
-  try { response=await fetch(API_BASE+path,{...options,headers}); }
-  catch { throw new Error("Cannot reach the API. Is the Worker deployed, and is its URL correct?"); }
+  try {
+    response=await fetch(API_BASE+path,{
+      ...options,
+      headers,
+      credentials:"include"
+    });
+  } catch {
+    throw new Error("Cannot reach the API. Check the Worker deployment and your browser's cookie settings.");
+  }
   const data=await response.json().catch(()=>({error:"Invalid server response"}));
-  if(!response.ok) throw new Error(data.error||`Request failed (${response.status})`);
+  if(!response.ok){
+    const error=new Error(data.error||`Request failed (${response.status})`);
+    error.status=response.status;
+    if(response.status===401 && path!=="/api/login" && path!=="/api/register") clearAuthenticatedUser();
+    throw error;
+  }
   return data;
 }
+
 function setConnection(online) {
   $("connection").classList.toggle("online",online);
   $("connection").innerHTML=`<i></i> ${online?"API ONLINE":"API OFFLINE"}`;
 }
-function updateAccountButton(){ $("account-button").textContent=username?`${username} · Log out`:"Log in"; }
+function updateAccountButton(){
+  $("account-button").textContent=authenticated&&username?`${username} · Account`:"Log in";
+}
+function setAuthenticatedUser(name){
+  username=name;
+  authenticated=true;
+  localStorage.setItem("ac_username",name);
+  inventory=loadInventory();
+  updateAccountButton();
+  renderInventory();
+  renderCrafting();
+}
+function clearAuthenticatedUser(){
+  authenticated=false;
+  username=null;
+  localStorage.removeItem("ac_username");
+  inventory=loadInventory();
+  updateAccountButton();
+  renderInventory();
+  renderCrafting();
+}
 function openAuth(mode="register"){
   authMode=mode; $("auth-title").textContent=mode==="register"?"Join the world":"Welcome back";
   $("auth-submit").textContent=mode==="register"?"Create account →":"Log in →";
   document.querySelectorAll(".auth-tabs button").forEach(b=>b.classList.toggle("active",b.dataset.mode===mode));
   $("auth-message").textContent=""; $("auth-dialog").showModal();
 }
-$("account-button").addEventListener("click",()=>{
-  if(token){
-    token=null; username=null; localStorage.removeItem("ac_token"); localStorage.removeItem("ac_username");
-    inventory=loadInventory(); updateAccountButton(); renderInventory(); renderCrafting(); toast("Logged out.");
-  } else openAuth("login");
+async function restoreSession(){
+  try{
+    const data=await api("/api/me");
+    setAuthenticatedUser(data.user.username);
+  }catch(error){
+    clearAuthenticatedUser();
+    if(error.status!==401) console.warn("Could not restore the account session:",error);
+  }
+}
+async function openAccountDialog(){
+  if(!authenticated){openAuth("login");return;}
+  $("account-dialog").showModal();
+  await refreshSessions();
+}
+async function refreshSessions(){
+  const list=$("sessions-list");
+  list.innerHTML='<div class="empty">Loading active sessions…</div>';
+  try{
+    const data=await api("/api/sessions");
+    if(!data.sessions.length){list.innerHTML='<div class="empty">No active sessions found.</div>';return;}
+    list.innerHTML=data.sessions.map(session=>{
+      const created=formatDate(session.created_at);
+      const lastSeen=formatDate(session.last_seen_at);
+      const device=escapeHtml(session.user_agent||"Unknown browser");
+      const current=session.is_current;
+      return `<div class="session-row"><div class="session-details"><strong>${current?"This device":"Signed-in device"} ${current?'<span class="current-session">CURRENT</span>':""}</strong><small>${device}</small><small>Signed in: ${created} · Last active: ${lastSeen}</small><small>Expires after inactivity: ${formatDate(session.idle_expires_at)} · Absolute expiry: ${formatDate(session.expires_at)}</small></div>${current?'<span class="session-current-label">Current</span>':`<button class="button button-outline revoke-session" type="button" data-revoke-session="${escapeAttr(session.session_id)}">Revoke</button>`}</div>`;
+    }).join("");
+  }catch(error){
+    list.innerHTML=`<div class="empty">${escapeHtml(error.message)}</div>`;
+    if(error.status===401){clearAuthenticatedUser();$("account-dialog").close();openAuth("login");}
+  }
+}
+function formatDate(value){
+  const date=typeof value==="number"?new Date(value):new Date(value);
+  return Number.isNaN(date.getTime())?"Unknown":date.toLocaleString();
+}
+
+$("account-button").addEventListener("click",openAccountDialog);
+$("logout-button").addEventListener("click",async()=>{
+  const button=$("logout-button");button.disabled=true;
+  try{
+    await api("/api/logout",{method:"POST",body:"{}"});
+    clearAuthenticatedUser();
+    $("account-dialog").close();
+    toast("This device has been logged out.");
+  }catch(error){toast(error.message,true);}
+  finally{button.disabled=false;}
+});
+$("sessions-list").addEventListener("click",async event=>{
+  const button=event.target.closest("[data-revoke-session]");
+  if(!button)return;
+  button.disabled=true;
+  try{
+    await api(`/api/sessions/${encodeURIComponent(button.dataset.revokeSession)}`,{method:"DELETE"});
+    toast("Session revoked.");
+    await refreshSessions();
+  }catch(error){toast(error.message,true);button.disabled=false;}
 });
 document.querySelectorAll(".auth-tabs button").forEach(b=>b.addEventListener("click",()=>openAuth(b.dataset.mode)));
 $("auth-form").addEventListener("submit",async e=>{
   e.preventDefault(); const submit=$("auth-submit"); submit.disabled=true;
   try{
     const data=await api(`/api/${authMode}`,{method:"POST",body:JSON.stringify({username:$("auth-username").value,password:$("auth-password").value})});
-    token=data.token; username=data.username; localStorage.setItem("ac_token",token);localStorage.setItem("ac_username",username);
-    inventory=loadInventory(); $("auth-dialog").close();updateAccountButton();renderInventory();renderCrafting();toast(`Welcome, ${username}!`);await refreshRegistry();
-  }catch(err){$("auth-message").textContent=err.message;}
-  finally{submit.disabled=false;}
+    // Verify the browser accepted and returned the HttpOnly cookie before showing a logged-in state.
+    const verified=await api("/api/me");
+    setAuthenticatedUser(verified.user.username);
+    $("auth-dialog").close();toast(`Welcome, ${data.username}!`);await refreshRegistry();
+  }catch(err){
+    $("auth-message").textContent=err.message;
+    if(err.status===401 && /cookie|session/i.test(err.message)){
+      $("auth-message").textContent="The browser did not retain the secure session cookie. Check third-party/partitioned cookie settings, or use a same-site custom domain for the API.";
+    }
+  }finally{submit.disabled=false;}
 });
 
 async function refreshRegistry(){
@@ -180,13 +272,13 @@ $("crafting-list").addEventListener("click",e=>{
 });
 
 $("block-form").addEventListener("submit",async e=>{
-  e.preventDefault();if(!token){openAuth("register");toast("Log in to publish a block.");return;}
+  e.preventDefault();if(!authenticated){openAuth("login");toast("Log in to publish a block.");return;}
   const body={name:$("block-name").value,id:$("block-id").value,hardness:Number($("block-hardness").value),light:Number($("block-light").value),colour:$("block-colour").value,behaviour:$("block-behaviour").value};
   try{await api("/api/blocks",{method:"POST",body:JSON.stringify(body)});toast("Block published to the registry.");e.target.reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";await refreshRegistry();}
   catch(err){toast(err.message,true);}
 });
 $("recipe-form").addEventListener("submit",async e=>{
-  e.preventDefault();if(!token){openAuth("register");toast("Log in to publish a recipe.");return;}
+  e.preventDefault();if(!authenticated){openAuth("login");toast("Log in to publish a recipe.");return;}
   const body={name:$("recipe-name").value,ingredients:$("recipe-ingredients").value.split(",").map(x=>x.trim().toLowerCase()).filter(Boolean),result_id:$("recipe-result").value.trim().toLowerCase(),quantity:Number($("recipe-quantity").value)};
   try{await api("/api/recipes",{method:"POST",body:JSON.stringify(body)});toast("Recipe published.");e.target.reset();$("recipe-quantity").value=1;await refreshRegistry();}
   catch(err){toast(err.message,true);}
@@ -223,4 +315,4 @@ window.addEventListener("keydown",e=>{
   }
 });
 
-drawWorld();updateAccountButton();renderInventory();refreshRegistry();
+drawWorld();updateAccountButton();renderInventory();restoreSession();refreshRegistry();
