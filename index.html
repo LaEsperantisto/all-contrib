@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#10151d">
+  <title>All Contribute</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#" aria-label="All Contribute home"><span class="brand-mark">A</span><span>ALL <b>CONTRIBUTE</b></span></a>
+    <div class="top-actions">
+      <span id="connection" class="status"><i></i> Connecting</span>
+      <button id="account-button" class="button button-quiet">Log in</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="hero">
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="pulse"></span> A WORLD BUILT BY EVERYONE</div>
+        <h1>Play the world.<br><em>Change the world.</em></h1>
+        <p>Mine, build, explore — then invent blocks, machines and recipes that become part of the world itself.</p>
+        <div class="hero-buttons">
+          <button class="button button-primary" id="play-button">Enter the world <span>↗</span></button>
+          <button class="button button-outline" id="creator-button">Open creator studio</button>
+        </div>
+        <div class="stats"><div><strong id="block-count">—</strong><span>registered blocks</span></div><div><strong id="recipe-count">—</strong><span>community recipes</span></div><div><strong>∞</strong><span>ideas to contribute</span></div></div>
+      </div>
+      <div class="world-card">
+        <div class="world-card-head"><span><i class="live-dot"></i> COMMUNITY WORLD</span><span class="tag">PROTOTYPE</span></div>
+        <canvas id="world-canvas" width="720" height="420" aria-label="Interactive voxel world demo"></canvas>
+        <div class="world-card-foot"><span>WASD / arrow keys to move</span><span id="player-position">x 0 · y 0</span></div>
+      </div>
+    </section>
+
+    <section class="section-heading game-heading" id="game-tools">
+      <div><span class="eyebrow">COLLECT & CREATE</span><h2>Inventory and crafting</h2></div>
+      <p>Test items can be added by ID.<br>Recipes consume ingredients and create their result.</p>
+    </section>
+    <section class="game-tools-grid">
+      <article class="panel inventory-panel">
+        <div class="panel-title"><div class="icon-box violet">▤</div><div><h3>Inventory</h3><p>Your current item stacks</p></div><span id="inventory-total" class="panel-number">0 items</span></div>
+        <form id="add-item-form" class="add-item-form">
+          <label>Block / item ID<input id="add-item-id" maxlength="128" placeholder="e.g. minecraft:stone" autocomplete="off" spellcheck="false" required></label>
+          <div class="form-row add-item-row"><label>Quantity<input id="add-item-quantity" type="number" min="1" max="999" value="16" required></label><button class="button button-primary add-item-button" type="submit">＋ Add test items</button></div>
+        </form>
+        <p class="micro-note">Testing tool: any syntactically valid ID can be added, even if it is not in the registry. Inventory is saved in this browser only.</p>
+        <div class="inventory-list-heading"><span>ITEM</span><span>QUANTITY</span></div>
+        <div id="inventory-list" class="inventory-list"><div class="empty">Your inventory is empty. Add an item ID above to begin.</div></div>
+        <button id="clear-inventory-button" class="text-button" type="button">Clear inventory</button>
+      </article>
+
+      <article class="panel crafting-panel">
+        <div class="panel-title"><div class="icon-box amber">⚒</div><div><h3>Crafting table</h3><p>Use published community recipes</p></div><span id="craftable-count" class="panel-number">0 craftable</span></div>
+        <div id="crafting-list" class="crafting-list"><div class="empty">Loading recipes…</div></div>
+        <p class="micro-note">Each occurrence of an ingredient ID in a recipe consumes one item. Repeating an ID represents a larger ingredient quantity.</p>
+      </article>
+    </section>
+
+    <section class="section-heading" id="studio"><div><span class="eyebrow">YOUR IDEAS, YOUR RULES</span><h2>Creator studio</h2></div><p>Publish content to the shared registry.<br>Only its creator can edit it.</p></section>
+    <section class="studio-grid">
+      <article class="panel">
+        <div class="panel-title"><div class="icon-box violet">▦</div><div><h3>Block workshop</h3><p>Design a new block</p></div><span class="panel-number">01</span></div>
+        <form id="block-form">
+          <label>Block name<input id="block-name" maxlength="40" placeholder="e.g. Starstone" required></label>
+          <label>Namespace / ID<input id="block-id" maxlength="48" placeholder="starstone" required pattern="[a-z0-9_:-]+"></label>
+          <div class="form-row"><label>Hardness<input id="block-hardness" type="number" min="0" max="1000" step="0.1" value="2"></label><label>Light (0–15)<input id="block-light" type="number" min="0" max="15" value="0"></label></div>
+          <label>Colour<input id="block-colour" type="color" value="#8b72e8" class="colour-input"></label>
+          <label>Behaviour <span class="optional">safe, declarative</span><select id="block-behaviour"><option value="solid">Solid</option><option value="transparent">Transparent</option><option value="glowing">Glowing</option><option value="decorative">Decorative</option></select></label>
+          <button class="button button-primary full" type="submit">Publish block <span>＋</span></button>
+        </form>
+        <p class="micro-note">No arbitrary code is executed. This prototype accepts safe block properties only.</p>
+      </article>
+      <article class="panel">
+        <div class="panel-title"><div class="icon-box amber">⚒</div><div><h3>Recipe forge</h3><p>Make something new</p></div><span class="panel-number">02</span></div>
+        <form id="recipe-form">
+          <label>Recipe name<input id="recipe-name" maxlength="60" placeholder="e.g. Starstone brick" required></label>
+          <label>Ingredients <span class="optional">comma-separated item IDs; repeat IDs for extra quantity</span><input id="recipe-ingredients" placeholder="minecraft:stone, minecraft:coal" required></label>
+          <div class="form-row"><label>Result block / item ID<input id="recipe-result" placeholder="player:yourname:starstone" required></label><label>Quantity<input id="recipe-quantity" type="number" min="1" max="999" value="1"></label></div>
+          <button class="button button-primary full" type="submit">Publish recipe <span>＋</span></button>
+        </form>
+        <p class="micro-note">Use full IDs, such as <code>minecraft:stone</code> or <code>player:username:block_id</code>. Recipes become available in the crafting table.</p>
+      </article>
+    </section>
+
+    <section class="section-heading registry-heading"><div><span class="eyebrow">MADE BY PLAYERS</span><h2>Community registry</h2></div><button id="refresh-button" class="button button-outline">↻ Refresh</button></section>
+    <section class="registry-grid">
+      <article class="panel registry-panel"><div class="registry-title"><h3>Blocks</h3><span id="blocks-total" class="count">0</span></div><div id="blocks-list" class="registry-list"><div class="empty">Loading blocks…</div></div></article>
+      <article class="panel registry-panel"><div class="registry-title"><h3>Recipes</h3><span id="recipes-total" class="count">0</span></div><div id="recipes-list" class="registry-list"><div class="empty">Loading recipes…</div></div></article>
+    </section>
+
+    <footer><span>ALL CONTRIBUTE <b>·</b> EARLY PROTOTYPE</span><span>Built for a world that belongs to its contributors.</span></footer>
+  </main>
+
+  <dialog id="auth-dialog" class="modal">
+    <form method="dialog" class="modal-close"><button aria-label="Close">×</button></form>
+    <div class="modal-mark">A</div><span class="eyebrow">PLAYER IDENTITY</span><h2 id="auth-title">Join the world</h2><p class="modal-sub">One account. Your creations.</p>
+    <div class="auth-tabs"><button type="button" class="active" data-mode="register">Create account</button><button type="button" data-mode="login">Log in</button></div>
+    <form id="auth-form" class="auth-form"><label>Username<input id="auth-username" minlength="3" maxlength="24" autocomplete="username" required pattern="[A-Za-z0-9_]+" placeholder="Your unique name"></label><label>Password<input id="auth-password" type="password" minlength="8" autocomplete="current-password" required placeholder="At least 8 characters"></label><button class="button button-primary full" id="auth-submit" type="submit">Create account →</button></form>
+    <p id="auth-message" class="auth-message" aria-live="polite"></p><p class="micro-note">Prototype accounts: use a unique username and a strong password.</p>
+  </dialog>
+  <div id="toast" role="status" class="toast"></div>
+  <script src="./app.js"></script>
+</body>
+</html>
