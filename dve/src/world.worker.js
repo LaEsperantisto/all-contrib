@@ -1,6 +1,6 @@
-// World thread: runs the vlox world simulation for the shared-world slab.
-// Radius is deliberately small; the generator paints nothing outside the
-// slab, and the world API only exposes this window anyway.
+// World thread: runs the vlox world simulation for the finite procedural
+// world (96x32x96, see world.js). The generator paints nothing outside the
+// world bounds; sectors beyond them stay empty.
 import { StartWorld } from "@divinevoxel/vlox/Init/StartWorld";
 import { WorldSimulation } from "@divinevoxel/vlox/WorldSimulation";
 import { TickInterval } from "@divinevoxel/vlox/Util/TickInterval";
@@ -53,7 +53,7 @@ const tickInterval = new TickInterval(() => {
 }, 50);
 
 Threads.registerTask("start-world", async () => {
-  const position = { x: 0, y: 16, z: 8 };
+  const position = { x: 0, y: 16, z: 0 };
   await WorldSimulation.Procedures.InitalLoad({
     genData: {
       position,

@@ -8,42 +8,81 @@
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
-  <header class="topbar">
-    <a class="brand" href="#" aria-label="All Contribute home"><span class="brand-mark">A</span><span>ALL <b>CONTRIBUTE</b></span></a>
-    <div class="top-actions">
-      <span id="connection" class="status"><i></i> Connecting</span>
-      <button id="account-button" class="button button-quiet">Log in</button>
+  <!-- The site IS the game: opening the page boots straight into the shared
+       voxel world. HUD elements float on top; menus live in dialogs. -->
+  <div id="game">
+    <canvas id="game-canvas"></canvas>
+    <div id="crosshair" aria-hidden="true"></div>
+    <div class="hud-top">
+      <span id="hud-server" class="hud-chip">server: —</span>
+      <span id="hud-coords" class="hud-chip">x 0 · y 0 · z 0</span>
+      <span id="hud-mode" class="hud-chip">walk</span>
+      <span id="hud-held" class="hud-chip">no item</span>
     </div>
-  </header>
+    <div id="hotbar"></div>
+    <div class="hud-buttons">
+      <button id="hud-inventory" class="button button-quiet" type="button">Inventory <small>E</small></button>
+      <button id="hud-studio" class="button button-quiet" type="button">Block manager <small>B</small></button>
+      <button id="hud-fly" class="button button-quiet" type="button">Fly: off <small>F</small></button>
+      <button id="hud-menu" class="button button-quiet" type="button">Menu <small>Esc</small></button>
+    </div>
+    <div id="game-loading">
+      <span id="game-loading-text">starting 3D engine…</span>
+      <p class="hero-keys">In game: <b>WASD</b> move · mouse look · <b>Space/Shift</b> fly · <b>F</b> fly/walk · <b>1–9</b> hotbar · left-click break · right-click place · <b>E</b> inventory · <b>B</b> block manager · <b>Esc</b> menu</p>
+    </div>
+  </div>
 
-  <main class="layout">
-    <section class="hero">
-      <div class="hero-copy">
-        <div class="eyebrow"><span class="pulse"></span> A WORLD BUILT BY EVERYONE</div>
-        <h1>Play the world.<br><em>Change the world.</em></h1>
-        <p>Mine, build, explore — then invent blocks, machines and recipes that become part of the world itself.</p>
-        <div class="hero-buttons">
-          <button class="button button-primary" id="play-button">Enter the world <span>↗</span></button>
-          <button class="button button-outline" id="creator-button">Open creator studio</button>
-        </div>
-        <div class="stats"><div><strong id="block-count">—</strong><span>registered blocks</span></div><div><strong id="recipe-count">—</strong><span>community recipes</span></div><div><strong>∞</strong><span>ideas to contribute</span></div></div>
-      </div>
-      <div class="world-card">
-        <div class="world-card-head"><span><i class="live-dot"></i> COMMUNITY WORLD</span><button id="open-3d-button" class="button button-outline" type="button">3D view</button></div>
-        <canvas id="world-canvas" width="720" height="420" aria-label="Interactive voxel world demo"></canvas>
-        <div class="world-card-foot"><span>Click: place selected · Right/Shift-click: break · WASD: move</span><span id="selected-item">no item selected</span><span id="player-position">x 0 · y 0</span></div>
-      </div>
-      <div id="view3d" class="view3d" hidden>
-        <div class="view3d-bar"><strong>3D world</strong><span id="view3d-status">starting engine…</span><span class="view3d-hint">Drag: orbit · Wheel: zoom · Click face: place selected · Right-click: break</span><button id="view3d-close" class="button button-outline" type="button">Close</button></div>
-        <canvas id="view3d-canvas"></canvas>
-      </div>
-    </section>
+  <!-- Pause / main menu (Esc or the Menu button). -->
+  <dialog id="pause-dialog" class="modal pause-modal">
+    <div class="modal-mark">A</div><span class="eyebrow">ALL CONTRIBUTE</span><h2>Paused</h2>
+    <p class="modal-sub"><span id="pause-server-chip">Server: global</span> · <span id="pause-account-chip">not signed in</span></p>
+    <div class="pause-menu">
+      <button id="pause-resume" class="button button-primary full" type="button">Resume <span>▶</span></button>
+      <button id="pause-inventory" class="button button-outline full" type="button">Inventory</button>
+      <button id="pause-studio" class="button button-outline full" type="button">Block manager</button>
+      <button id="pause-settings" class="button button-outline full" type="button">Settings</button>
+      <button id="pause-account" class="button button-outline full" type="button">Account</button>
+    </div>
+    <p class="micro-note">The world is shared and server-authoritative: your edits land for every player. Log in (or create an account) to keep your inventory and creations.</p>
+  </dialog>
 
-    <section class="section-heading game-heading" id="game-tools">
-      <div><span class="eyebrow">COLLECT & CREATE</span><h2>Inventory and crafting</h2></div>
-      <p>Test items can be added by ID.<br>Recipes consume ingredients and create their result.</p>
-    </section>
-    <section class="game-tools-grid">
+  <dialog id="auth-dialog" class="modal">
+    <form method="dialog" class="modal-close"><button aria-label="Close">×</button></form>
+    <div class="modal-mark">A</div><span class="eyebrow">PLAYER IDENTITY</span><h2 id="auth-title">Join the world</h2><p class="modal-sub">One account. Your creations.</p>
+    <div class="auth-tabs"><button type="button" class="active" data-mode="register">Create account</button><button type="button" data-mode="login">Log in</button></div>
+    <form id="auth-form" class="auth-form"><label>Username<input id="auth-username" minlength="3" maxlength="24" autocomplete="username" required pattern="[A-Za-z0-9_]+" placeholder="Your unique name"></label><label>Password<input id="auth-password" type="password" minlength="8" autocomplete="current-password" required placeholder="At least 8 characters"></label><button class="button button-primary full" id="auth-submit" type="submit">Create account →</button></form>
+    <p id="auth-message" class="auth-message" aria-live="polite"></p><p class="micro-note">Prototype accounts: use a unique username and a strong password.</p>
+  </dialog>
+
+  <dialog id="account-dialog" class="modal account-modal">
+    <form method="dialog" class="modal-close"><button aria-label="Close">×</button></form>
+    <div class="modal-mark">A</div><span class="eyebrow">ACCOUNT SECURITY</span>
+    <h2>Active sessions</h2>
+    <p class="modal-sub">Your session expires after 7 days of inactivity or 30 days after sign-in, whichever comes first.</p>
+    <div id="sessions-list" class="sessions-list"><div class="empty">Loading active sessions…</div></div>
+    <div class="session-policy-note">Revoking a device signs it out immediately. Logging out below revokes this device's session.</div>
+    <button id="logout-button" class="button button-primary full" type="button">Log out this device</button>
+  </dialog>
+
+  <dialog id="settings-dialog" class="modal settings-modal">
+    <form method="dialog" class="modal-close"><button aria-label="Close">×</button></form>
+    <div class="modal-mark">A</div><span class="eyebrow">GAME SETTINGS</span><h2>Settings</h2>
+    <div class="settings-grid">
+      <label>Server<select id="set-server"><option value="global">Global — all-contrib.all-contrib.workers.dev</option></select></label>
+      <label>Mouse sensitivity<input id="set-sensitivity" type="range" min="1" max="10" step="1" value="5"><output id="set-sensitivity-out">5</output></label>
+      <label>Field of view<input id="set-fov" type="range" min="60" max="110" step="1" value="80"><output id="set-fov-out">80°</output></label>
+      <label>Render distance<input id="set-distance" type="range" min="120" max="2000" step="20" value="900"><output id="set-distance-out">900</output></label>
+      <label>Movement speed<input id="set-speed" type="range" min="3" max="20" step="1" value="8"><output id="set-speed-out">8</output></label>
+      <label>Camera mode<select id="set-mode"><option value="walk">Walk on terrain</option><option value="fly">Free fly</option></select></label>
+    </div>
+    <p class="micro-note">Settings are stored in this browser and apply to the 3D game immediately.</p>
+    <button id="settings-reset" class="text-button" type="button">Reset to defaults</button>
+  </dialog>
+
+  <dialog id="inventory-dialog" class="modal wide-modal">
+    <form method="dialog" class="modal-close"><button aria-label="Close">×</button></form>
+    <div class="modal-mark">▤</div><span class="eyebrow">COLLECT &amp; CRAFT</span><h2>Inventory and crafting</h2>
+    <div class="game-tools-grid modal-grid">
       <article class="panel inventory-panel">
         <div class="panel-title"><div class="icon-box violet">▤</div><div><h3>Inventory</h3><p>Your current item stacks</p></div><span id="inventory-total" class="panel-number">0 items</span></div>
         <form id="add-item-form" class="add-item-form">
@@ -52,21 +91,24 @@
         </form>
         <p class="micro-note">Testing tool: grants stacks to your account (server-side). Placing spends, breaking returns; IDs not in the registry cannot be placed.</p>
         <div class="inventory-list-heading"><span>ITEM</span><span>QUANTITY</span></div>
-        <div id="inventory-list" class="inventory-list"><div class="empty">Your inventory is empty. Add an item ID above to begin.</div></div>
+        <div id="inventory-list" class="inventory-list"><div class="empty">Your inventory is empty. Break blocks in the world or add items above.</div></div>
         <button id="clear-inventory-button" class="text-button" type="button">Clear inventory</button>
       </article>
-
       <article class="panel crafting-panel">
         <div class="panel-title"><div class="icon-box amber">⚒</div><div><h3>Crafting table</h3><p>Use published community recipes</p></div><span id="craftable-count" class="panel-number">0 craftable</span></div>
         <div id="crafting-list" class="crafting-list"><div class="empty">Loading recipes…</div></div>
         <p class="micro-note">Each occurrence of an ingredient ID in a recipe consumes one item. Repeating an ID represents a larger ingredient quantity.</p>
       </article>
-    </section>
+    </div>
+  </dialog>
 
-    <section class="section-heading" id="studio"><div><span class="eyebrow">YOUR IDEAS, YOUR RULES</span><h2>Creator studio</h2></div><p>Publish content to the shared registry.<br>Only its creator can edit it.</p></section>
-    <section class="studio-grid">
+  <dialog id="studio-dialog" class="modal wide-modal">
+    <form method="dialog" class="modal-close"><button aria-label="Close">×</button></form>
+    <div class="modal-mark">▦</div><span class="eyebrow">YOUR IDEAS, YOUR RULES</span><h2>Creator studio</h2>
+    <p class="modal-sub">Publish content to the shared registry. Only its creator can edit or remove it.</p>
+    <div class="studio-grid modal-grid">
       <article class="panel">
-        <div class="panel-title"><div class="icon-box violet">▦</div><div><h3>Block workshop</h3><p>Design a new block</p></div><span class="panel-number">01</span></div>
+        <div class="panel-title"><div class="icon-box violet">▦</div><div><h3 id="block-form-title">Block workshop</h3><p id="block-form-sub">Design a new block</p></div><span class="panel-number">01</span></div>
         <form id="block-form">
           <label>Block name<input id="block-name" maxlength="40" placeholder="e.g. Starstone" required></label>
           <label>Namespace / ID<input id="block-id" maxlength="48" placeholder="starstone" required pattern="[a-z0-9_:-]+"></label>
@@ -77,7 +119,8 @@
             <label>Support<select id="block-support"><option value="solid">Needs solid below</option><option value="any">Any empty cell</option><option value="none">Needs empty below</option></select></label>
             <label>Incompatible IDs <span class="optional">comma-separated; placement refuses next to these</span><input id="block-incompatible" placeholder="builtin:stone, …" autocomplete="off" spellcheck="false"></label>
           </div>
-          <button class="button button-primary full" type="submit">Publish block <span>＋</span></button>
+          <div class="edit-note" id="block-edit-note" hidden>Editing <code id="block-edit-id"></code> — the ID cannot change. <button type="button" id="block-edit-cancel" class="text-button">Cancel edit</button></div>
+          <button class="button button-primary full" id="block-submit" type="submit">Publish block <span>＋</span></button>
         </form>
         <p class="micro-note">No arbitrary code is executed. This prototype accepts safe block properties only.</p>
       </article>
@@ -91,33 +134,13 @@
         </form>
         <p class="micro-note">Use full IDs, such as <code>builtin:stone</code> or <code>player:username:block_id</code>. Recipes become available in the crafting table.</p>
       </article>
-    </section>
-
-    <section class="section-heading registry-heading"><div><span class="eyebrow">MADE BY PLAYERS</span><h2>Community registry</h2></div><button id="refresh-button" class="button button-outline">↻ Refresh</button></section>
-    <section class="registry-grid">
-      <article class="panel registry-panel"><div class="registry-title"><h3>Blocks</h3><span id="blocks-total" class="count">0</span></div><div id="blocks-list" class="registry-list"><div class="empty">Loading blocks…</div></div></article>
-      <article class="panel registry-panel"><div class="registry-title"><h3>Recipes</h3><span id="recipes-total" class="count">0</span></div><div id="recipes-list" class="registry-list"><div class="empty">Loading recipes…</div></div></article>
-    </section>
-
-    <footer><span>ALL CONTRIBUTE <b>·</b> EARLY PROTOTYPE</span><span>Built for a world that belongs to its contributors.</span></footer>
-  </main>
-
-  <dialog id="auth-dialog" class="modal">
-    <form method="dialog" class="modal-close"><button aria-label="Close">×</button></form>
-    <div class="modal-mark">A</div><span class="eyebrow">PLAYER IDENTITY</span><h2 id="auth-title">Join the world</h2><p class="modal-sub">One account. Your creations.</p>
-    <div class="auth-tabs"><button type="button" class="active" data-mode="register">Create account</button><button type="button" data-mode="login">Log in</button></div>
-    <form id="auth-form" class="auth-form"><label>Username<input id="auth-username" minlength="3" maxlength="24" autocomplete="username" required pattern="[A-Za-z0-9_]+" placeholder="Your unique name"></label><label>Password<input id="auth-password" type="password" minlength="8" autocomplete="current-password" required placeholder="At least 8 characters"></label><button class="button button-primary full" id="auth-submit" type="submit">Create account →</button></form>
-    <p id="auth-message" class="auth-message" aria-live="polite"></p><p class="micro-note">Prototype accounts: use a unique username and a strong password.</p>
+    </div>
+    <article class="panel my-blocks-panel">
+      <div class="panel-title"><div class="icon-box violet">⌗</div><div><h3>My blocks</h3><p>Edit or remove blocks you created</p></div></div>
+      <div id="my-blocks-list" class="registry-list"><div class="empty">You have not published any blocks yet.</div></div>
+    </article>
   </dialog>
-  <dialog id="account-dialog" class="modal account-modal">
-    <form method="dialog" class="modal-close"><button aria-label="Close">×</button></form>
-    <div class="modal-mark">A</div><span class="eyebrow">ACCOUNT SECURITY</span>
-    <h2>Active sessions</h2>
-    <p class="modal-sub">Your session expires after 7 days of inactivity or 30 days after sign-in, whichever comes first.</p>
-    <div id="sessions-list" class="sessions-list"><div class="empty">Loading active sessions…</div></div>
-    <div class="session-policy-note">Revoking a device signs it out immediately. Logging out below revokes this device's session.</div>
-    <button id="logout-button" class="button button-primary full" type="button">Log out this device</button>
-  </dialog>
+
   <div id="toast" role="status" class="toast"></div>
   <script src="./app.js"></script>
 </body>

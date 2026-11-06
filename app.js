@@ -1,8 +1,37 @@
-// All Contribute frontend prototype.
-const API_BASE = ["localhost","127.0.0.1"].includes(location.hostname)
+// All Contribute frontend: fullscreen 3D game boots immediately; menus live
+// in dialogs (Esc opens the pause menu). The world is server-authoritative:
+// edits go through /api/world/place|break and paint only from the server echo.
+const $ = (id) => document.getElementById(id);
+
+// ---- Settings + server selection ------------------------------------------------
+const DEFAULT_SETTINGS = { server: "global", sens: 5, fov: 80, distance: 900, speed: 8, mode: "walk" };
+let settings = { ...DEFAULT_SETTINGS };
+try {
+  const raw = JSON.parse(localStorage.getItem("ac_settings") || "{}");
+  if (raw && typeof raw === "object") settings = { ...settings, ...raw };
+} catch { /* defaults */ }
+if (!["global", "local"].includes(settings.server)) settings.server = "global";
+function saveSettings() { localStorage.setItem("ac_settings", JSON.stringify(settings)); }
+const isLocalPage = ["localhost", "127.0.0.1"].includes(location.hostname);
+if (!isLocalPage) settings.server = "global"; // https page → http dev API is mixed content
+let API_BASE = settings.server === "local" && isLocalPage
   ? "http://127.0.0.1:8787"
   : "https://all-contrib.all-contrib.workers.dev";
-const $ = (id) => document.getElementById(id);
+function updateServerChip() {
+  const label = settings.server === "local" && isLocalPage ? "Server: local dev" : "Server: global";
+  $("hud-server").textContent = label.toLowerCase();
+  $("pause-server-chip").textContent = label;
+}
+// Sensitivity slider 1..10 → radians per pixel; FOV degrees → Babylon vertical rad.
+const viewSettings = () => ({
+  sensitivity: settings.sens * 0.00046,
+  fov: settings.fov * Math.PI / 180 * 0.72,
+  renderDistance: settings.distance,
+  speed: settings.speed,
+  flySpeed: settings.speed * 2,
+  cameraMode: settings.mode,
+});
+
 let username = localStorage.getItem("ac_username");
 let authenticated = false;
 // Remove the old JavaScript-readable bearer token. Authentication now uses an HttpOnly cookie.
@@ -52,7 +81,6 @@ async function refreshInventory() {
     selectedItem = null;
     renderInventory();
     renderCrafting();
-    drawWorld();
     return;
   }
   try {
@@ -65,7 +93,6 @@ async function refreshInventory() {
   }
   renderInventory();
   renderCrafting();
-  drawWorld();
 }
 
 function toast(message, error=false) {
@@ -95,19 +122,22 @@ async function api(path, options={}) {
 }
 
 function setConnection(online) {
-  $("connection").classList.toggle("online",online);
-  $("connection").innerHTML=`<i></i> ${online?"API ONLINE":"API OFFLINE"}`;
+  const label = settings.server === "local" && isLocalPage ? "local dev" : "global";
+  $("pause-server-chip").textContent = `Server: ${label}${online ? "" : " (offline)"}`;
 }
-function updateAccountButton(){
-  $("account-button").textContent=authenticated&&username?`${username} · Account`:"Log in";
+function updateAccountChip(){
+  const label = authenticated && username ? username : "not signed in";
+  $("pause-account-chip").textContent = label;
+  $("pause-account").textContent = authenticated && username ? "Account" : "Log in / Register";
 }
 function setAuthenticatedUser(name){
   username=name;
   authenticated=true;
   localStorage.setItem("ac_username",name);
-  updateAccountButton();
+  updateAccountChip();
   renderInventory();
   renderCrafting();
+  renderMyBlocks();
   migrateLegacyInventory().then(refreshInventory);
 }
 function clearAuthenticatedUser(){
@@ -116,10 +146,10 @@ function clearAuthenticatedUser(){
   localStorage.removeItem("ac_username");
   inventory={};
   selectedItem=null;
-  updateAccountButton();
+  updateAccountChip();
   renderInventory();
   renderCrafting();
-  drawWorld();
+  renderMyBlocks();
 }
 function openAuth(mode="register"){
   authMode=mode; $("auth-title").textContent=mode==="register"?"Join the world":"Welcome back";
@@ -164,7 +194,7 @@ function formatDate(value){
   return Number.isNaN(date.getTime())?"Unknown":date.toLocaleString();
 }
 
-$("account-button").addEventListener("click",openAccountDialog);
+$("pause-account").addEventListener("click",openAccountDialog);
 $("logout-button").addEventListener("click",async()=>{
   const button=$("logout-button");button.disabled=true;
   try{
@@ -208,22 +238,12 @@ async function refreshRegistry(){
     setConnection(true);
     currentBlocks=Array.isArray(blocks.blocks)?blocks.blocks:[];
     currentRecipes=Array.isArray(recipes.recipes)?recipes.recipes:[];
-    renderBlocks(currentBlocks);renderRecipes(currentRecipes);renderInventory();renderCrafting();
-    $("block-count").textContent=currentBlocks.length;$("recipe-count").textContent=currentRecipes.length;
+    renderInventory();renderCrafting();renderMyBlocks();
   }catch(err){
     setConnection(false);currentBlocks=[];currentRecipes=[];
-    $("blocks-list").innerHTML='<div class="empty">API unavailable — deploy the Worker to load registry.</div>';
-    $("recipes-list").innerHTML='<div class="empty">API unavailable.</div>';
     renderInventory();$("crafting-list").innerHTML='<div class="empty">Recipes are unavailable until the API reconnects.</div>';
+    renderMyBlocks();
   }
-}
-function renderBlocks(items){
-  $("blocks-total").textContent=items.length;
-  $("blocks-list").innerHTML=items.length?items.slice().reverse().map(b=>`<div class="registry-item"><span class="swatch" style="background:${escapeAttr(b.colour)}"></span><div class="item-info"><strong>${escapeHtml(b.name)}</strong><small>${escapeHtml(b.id)} · ${escapeHtml(b.behaviour)}</small></div><span class="owner">${escapeHtml(b.creator)}</span></div>`).join(""):'<div class="empty">No blocks yet. Create the first one.</div>';
-}
-function renderRecipes(items){
-  $("recipes-total").textContent=items.length;
-  $("recipes-list").innerHTML=items.length?items.slice().reverse().map(r=>`<div class="registry-item"><span class="swatch" style="background:#b58a50"></span><div class="item-info"><strong>${escapeHtml(r.name)}</strong><small>${escapeHtml((r.ingredients||[]).join(" + "))} → ${escapeHtml(r.result_id)} ×${Number(r.quantity)||1}</small></div><span class="owner">${escapeHtml(r.creator)}</span></div>`).join(""):'<div class="empty">No recipes yet. Forge one.</div>';
 }
 function escapeHtml(v){return String(v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
 function escapeAttr(v){return escapeHtml(v).replace(/;/g,"");}
@@ -252,8 +272,7 @@ $("inventory-list").addEventListener("click",async e=>{
   }
   const row=e.target.closest("[data-item-id]");
   if(!row||!authenticated)return;
-  selectedItem=selectedItem===row.dataset.itemId?null:row.dataset.itemId;
-  renderInventory();drawWorld();
+  selectItem(selectedItem===row.dataset.itemId?null:row.dataset.itemId);
 });
 $("clear-inventory-button").addEventListener("click",async()=>{
   if(!authenticated){openAuth("login");return;}
@@ -261,10 +280,16 @@ $("clear-inventory-button").addEventListener("click",async()=>{
   catch(err){toast(err.message,true);}
 });
 function blockById(id){return currentBlocks.find(block=>block.id===id);}
+function selectItem(id){
+  selectedItem=id;
+  renderInventory();renderHotbar();
+  $("hud-held").textContent=selectedItem?(blockById(selectedItem)||{name:selectedItem}).name:"no item";
+}
 function renderInventory(){
   const entries=Object.entries(inventory).sort(([a],[b])=>a.localeCompare(b));
   const total=entries.reduce((sum,[,quantity])=>sum+quantity,0);
   $("inventory-total").textContent=`${total} item${total===1?"":"s"}`;
+  renderHotbar();
   if(!entries.length){$("inventory-list").innerHTML=`<div class="empty">${authenticated?"Your inventory is empty. Break blocks in the world or add items above.":"Log in — your inventory lives on your account."}</div>`;return;}
   $("inventory-list").innerHTML=entries.map(([id,quantity])=>{
     const block=blockById(id);const label=block?block.name:id;const colour=block&&/^#[0-9a-f]{6}$/i.test(block.colour)?block.colour:"#64748b";
@@ -272,6 +297,20 @@ function renderInventory(){
     return `<div class="inventory-item${selected}" data-item-id="${escapeAttr(id)}"><span class="swatch" style="background:${escapeAttr(colour)}"></span><div class="item-info"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(id)}</small></div><span class="item-quantity">×${quantity}</span><button class="remove-item" type="button" data-remove-item="${escapeAttr(id)}" aria-label="Remove one ${escapeAttr(id)}">−1</button></div>`;
   }).join("");
 }
+
+// Hotbar: first nine stacks, selectable with 1–9 or a click while in game.
+function renderHotbar(){
+  const entries=Object.entries(inventory).sort(([a],[b])=>a.localeCompare(b)).slice(0,9);
+  $("hotbar").innerHTML=entries.map(([id,quantity],i)=>{
+    const block=blockById(id);const colour=block&&/^#[0-9a-f]{6}$/i.test(block.colour)?block.colour:"#64748b";
+    const selected=id===selectedItem?" hotbar-selected":"";
+    return `<div class="hotbar-slot${selected}" data-slot-id="${escapeAttr(id)}" title="${escapeAttr(id)}"><span class="hotbar-key">${i+1}</span><span class="swatch" style="background:${escapeAttr(colour)}"></span><span class="hotbar-qty">${quantity}</span></div>`;
+  }).join("");
+}
+$("hotbar").addEventListener("click",e=>{
+  const slot=e.target.closest("[data-slot-id]");
+  if(slot)selectItem(slot.dataset.slotId===selectedItem?null:slot.dataset.slotId);
+});
 
 // Recipe ingredients are an array of IDs. Duplicate IDs represent multiple units.
 function ingredientRequirements(ingredients){
@@ -286,7 +325,7 @@ function renderCrafting(){
   const recipes=currentRecipes;
   const craftable=authenticated?recipes.filter(recipe=>missingIngredients(recipe).length===0&&Array.isArray(recipe.ingredients)&&recipe.ingredients.length>0).length:0;
   $("craftable-count").textContent=`${craftable} craftable`;
-  if(!recipes.length){$("crafting-list").innerHTML='<div class="empty">No recipes published yet. Create one in the Recipe Forge below.</div>';return;}
+  if(!recipes.length){$("crafting-list").innerHTML='<div class="empty">No recipes published yet. Create one in the Recipe Forge in the block manager.</div>';return;}
   $("crafting-list").innerHTML=recipes.slice().reverse().map(recipe=>{
     const ingredients=Array.isArray(recipe.ingredients)?recipe.ingredients:[];
     const missing=missingIngredients(recipe);
@@ -309,149 +348,283 @@ $("crafting-list").addEventListener("click",async e=>{
   }catch(err){toast(err.message,true);renderCrafting();}
 });
 
+// ---- Block workshop: publish, edit (own blocks), delete (own blocks) ----------
+let editingBlockId=null;
+const pendingDelete=new Set();
 $("block-form").addEventListener("submit",async e=>{
   e.preventDefault();if(!authenticated){openAuth("login");toast("Log in to publish a block.");return;}
-  const body={name:$("block-name").value,id:$("block-id").value,hardness:Number($("block-hardness").value),light:Number($("block-light").value),colour:$("block-colour").value,behaviour:$("block-behaviour").value,rules:{support:$("block-support").value,incompatibleWith:$("block-incompatible").value.split(",").map(x=>x.trim().toLowerCase()).filter(Boolean)}};
-  try{await api("/api/blocks",{method:"POST",body:JSON.stringify(body)});toast("Block published to the registry.");e.target.reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";await refreshRegistry();}
+  const rules={support:$("block-support").value,incompatibleWith:$("block-incompatible").value.split(",").map(x=>x.trim().toLowerCase()).filter(Boolean)};
+  const common={name:$("block-name").value,hardness:Number($("block-hardness").value),light:Number($("block-light").value),colour:$("block-colour").value,behaviour:$("block-behaviour").value,rules};
+  try{
+    if(editingBlockId){
+      await api(`/api/blocks/${encodeURIComponent(editingBlockId)}`,{method:"PUT",body:JSON.stringify(common)});
+      toast(`Block ${editingBlockId} updated.`);
+      exitEditMode();
+    }else{
+      await api("/api/blocks",{method:"POST",body:JSON.stringify({...common,id:$("block-id").value})});
+      toast("Block published to the registry. It becomes placeable immediately; textures reload on next visit.");
+      e.target.reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";
+    }
+    await refreshRegistry();
+  }
   catch(err){toast(err.message,true);}
 });
+function enterEditMode(block){
+  editingBlockId=block.id;
+  pendingDelete.clear();
+  const localId=block.id.startsWith("player:")?block.id.split(":").slice(2).join(":"):block.id;
+  let rules={};try{rules=JSON.parse(block.rules_json||"{}");}catch{/* defaults below */}
+  $("block-name").value=block.name;$("block-id").value=localId;
+  $("block-hardness").value=block.hardness;$("block-light").value=block.light;$("block-colour").value=block.colour;
+  $("block-behaviour").value=block.behaviour;$("block-support").value=rules.support||"solid";
+  $("block-incompatible").value=(rules.incompatibleWith||[]).join(", ");
+  $("block-id").readOnly=true;
+  $("block-edit-note").hidden=false;$("block-edit-id").textContent=block.id;
+  $("block-form-title").textContent="Edit block";$("block-form-sub").textContent="Changes apply to the live registry.";
+  $("block-submit").textContent="Save changes";
+  $("block-form").scrollIntoView({behavior:"smooth",block:"center"});
+}
+function exitEditMode(){
+  editingBlockId=null;
+  $("block-id").readOnly=false;
+  $("block-edit-note").hidden=true;
+  $("block-form-title").textContent="Block workshop";$("block-form-sub").textContent="Design a new block";
+  $("block-submit").innerHTML='Publish block <span>＋</span>';
+  $("block-form").reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";
+}
+$("block-edit-cancel").addEventListener("click",exitEditMode);
+function renderMyBlocks(){
+  const list=$("my-blocks-list");
+  if(!authenticated){list.innerHTML='<div class="empty">Log in to manage your own blocks.</div>';return;}
+  const mine=currentBlocks.filter(b=>String(b.creator||"").toLowerCase()===(username||"").toLowerCase());
+  if(!mine.length){list.innerHTML='<div class="empty">You have not published any blocks yet.</div>';return;}
+  list.innerHTML=mine.map(b=>{
+    const pending=pendingDelete.has(b.id);
+    return `<div class="registry-item"><span class="swatch" style="background:${escapeAttr(b.colour)}"></span><div class="item-info"><strong>${escapeHtml(b.name)}</strong><small>${escapeHtml(b.id)} · ${escapeHtml(b.behaviour)} · light ${Number(b.light)||0}</small></div><div class="my-block-actions"><button class="button button-outline" type="button" data-mb-edit="${escapeAttr(b.id)}">Edit</button><button class="button ${pending?"button-danger":"button-outline"}" type="button" data-mb-del="${escapeAttr(b.id)}">${pending?"Really delete?":"Delete"}</button></div></div>`;
+  }).join("");
+}
+$("my-blocks-list").addEventListener("click",async e=>{
+  const edit=e.target.closest("[data-mb-edit]");
+  if(edit){const block=blockById(edit.dataset.mbEdit);if(block)enterEditMode(block);return;}
+  const del=e.target.closest("[data-mb-del]");
+  if(!del)return;
+  const id=del.dataset.mbDel;
+  if(!pendingDelete.has(id)){pendingDelete.add(id);renderMyBlocks();return;} // two-step, no native confirm
+  try{
+    await api(`/api/blocks/${encodeURIComponent(id)}`,{method:"DELETE"});
+    pendingDelete.delete(id);
+    if(editingBlockId===id)exitEditMode();
+    if(selectedItem===id)selectItem(null);
+    await Promise.all([refreshRegistry(),refreshInventory()]);
+    toast(`Block ${id} removed from the registry.`);
+  }catch(err){pendingDelete.delete(id);renderMyBlocks();toast(err.message,true);}
+});
+
 $("recipe-form").addEventListener("submit",async e=>{
   e.preventDefault();if(!authenticated){openAuth("login");toast("Log in to publish a recipe.");return;}
   const body={name:$("recipe-name").value,ingredients:$("recipe-ingredients").value.split(",").map(x=>x.trim().toLowerCase()).filter(Boolean),result_id:$("recipe-result").value.trim().toLowerCase(),quantity:Number($("recipe-quantity").value)};
   try{await api("/api/recipes",{method:"POST",body:JSON.stringify(body)});toast("Recipe published.");e.target.reset();$("recipe-quantity").value=1;await refreshRegistry();}
   catch(err){toast(err.message,true);}
 });
-$("refresh-button").addEventListener("click",refreshRegistry);
-$("creator-button").addEventListener("click",()=>$("studio").scrollIntoView({behavior:"smooth"}));
-$("play-button").addEventListener("click",()=>{toast("Shared world: WASD moves, click places your selected item, right-click or Shift-click breaks.");$("world-canvas").scrollIntoView({behavior:"smooth",block:"center"});});
 
-// ---- Base terrain: MUST match backend/src/terrain.ts exactly -----------------
-function hashU32(n){n=(n|0)^0x9e3779b9;n=Math.imul(n,0x85ebca6b);n^=n>>>13;n=Math.imul(n,0xc2b2ae35);n^=n>>>16;return n>>>0;}
-function terrainHeight(x){return 10+(hashU32(Math.floor(x/4)^0x51ed2701)%6);}
-function baseBlock(x,y){const h=terrainHeight(x);if(y<h)return "air";if(y===h)return "builtin:grass";if(y<=h+3)return "builtin:dirt";return "builtin:stone";}
-
-// ---- Shared world: 2D view of the server grid (DVE renders the same data) ----
-const canvas=$("world-canvas"),ctx=canvas.getContext("2d");
-const TILE=30,COLS=Math.ceil(canvas.width/TILE)+1,ROWS=Math.ceil(canvas.height/TILE)+1;
-const player={x:0,y:terrainHeight(0)-3};
-const worldEdits=new Map();
-let headSeq=0,ws=null,wsRetry=0,dveView=null,dveMod=null,dveBusy=false;
-function cellBlock(x,y){const o=worldEdits.get(`${x},${y}`);return o!==undefined?o:baseBlock(x,y);}
-const camX=()=>player.x-Math.floor(COLS/2);
-const camY=()=>player.y-Math.floor(ROWS/2);
-const TERRAIN_COLOURS={"builtin:grass":"#648b4d","builtin:dirt":"#79583f","builtin:stone":"#777b82"};
-const stars=[];for(let i=0;i<60;i++)stars.push([Math.random()*canvas.width,Math.random()*canvas.height*.55,Math.random()*1.2+.2]);
-
-function drawWorld(){
-  ctx.fillStyle="#131a24";ctx.fillRect(0,0,canvas.width,canvas.height);
-  for(const[sx,sy,r]of stars){ctx.fillStyle=`rgba(230,242,255,${(r/4).toFixed(2)})`;ctx.beginPath();ctx.arc(sx,sy,r,0,Math.PI*2);ctx.fill();}
-  const cx=camX(),cy=camY();
-  for(let gy=0;gy<ROWS;gy++)for(let gx=0;gx<COLS;gx++){
-    const id=cellBlock(cx+gx,cy+gy);
-    if(id==="air")continue;
-    const block=blockById(id);
-    ctx.fillStyle=block&&/^#[0-9a-f]{6}$/i.test(block.colour)?block.colour:(TERRAIN_COLOURS[id]||"#4a5158");
-    ctx.fillRect(gx*TILE,gy*TILE,TILE-1,TILE-1);
-    if(block&&block.light>0){ctx.fillStyle=`rgba(255,240,170,${Math.min(.35,block.light/30).toFixed(2)})`;ctx.fillRect(gx*TILE,gy*TILE,TILE-1,TILE-1);}
-  }
-  ctx.fillStyle="rgba(197,183,255,.16)";ctx.fillRect((player.x-cx)*TILE,(player.y-cy)*TILE,TILE-1,TILE-1);
-  ctx.fillStyle="#c5b7ff";ctx.fillRect((player.x-cx)*TILE+7,(player.y-cy)*TILE+7,TILE-14,TILE-14);
-  ctx.fillStyle="#161326";ctx.fillRect((player.x-cx)*TILE+10,(player.y-cy)*TILE+10,TILE-20,TILE-20);
-  $("player-position").textContent=`x ${player.x} · y ${player.y}`;
-  $("selected-item").textContent=selectedItem?`using ${selectedItem}`:"no item selected";
+// ---- Settings dialog -----------------------------------------------------------
+function syncSettingsInputs(){
+  const sel=$("set-server");
+  sel.innerHTML='<option value="global">Global — all-contrib.all-contrib.workers.dev</option>';
+  if(isLocalPage)sel.innerHTML+='<option value="local">Local dev — http://127.0.0.1:8787</option>';
+  sel.value=settings.server;
+  $("set-sensitivity").value=settings.sens;$("set-sensitivity-out").textContent=settings.sens;
+  $("set-fov").value=settings.fov;$("set-fov-out").textContent=settings.fov+"°";
+  $("set-distance").value=settings.distance;$("set-distance-out").textContent=settings.distance;
+  $("set-speed").value=settings.speed;$("set-speed-out").textContent=settings.speed;
+  $("set-mode").value=settings.mode;
 }
-async function loadWorld(){
+
+// ---- Pause menu ---------------------------------------------------------------
+function openPause(){
+  setConnection(!lastWsFailed()); // refresh chip text at open
+  $("pause-dialog").showModal();
+}
+$("pause-resume").addEventListener("click",()=>$("pause-dialog").close());
+$("pause-settings").addEventListener("click",()=>{syncSettingsInputs();$("settings-dialog").showModal();});
+$("pause-inventory").addEventListener("click",openInventoryDialog);
+$("pause-studio").addEventListener("click",()=>$("studio-dialog").showModal());
+$("hud-menu").addEventListener("click",openPause);
+[["set-sensitivity","sens"],["set-fov","fov"],["set-distance","distance"],["set-speed","speed"]].forEach(([id,key])=>{
+  $(id).addEventListener("input",()=>{
+    settings[key]=Number($(id).value);saveSettings();
+    $("set-sensitivity-out").textContent=settings.sens;
+    $("set-fov-out").textContent=settings.fov+"°";
+    $("set-distance-out").textContent=settings.distance;
+    $("set-speed-out").textContent=settings.speed;
+    if(dveView)dveView.setSettings(viewSettings());
+  });
+});
+$("set-mode").addEventListener("change",()=>{settings.mode=$("set-mode").value;saveSettings();if(dveView)dveView.setSettings(viewSettings());updateFlyHud();});
+$("set-server").addEventListener("change",()=>{settings.server=$("set-server").value;saveSettings();location.reload();}); // fresh API_BASE, WS, session
+$("settings-reset").addEventListener("click",()=>{settings={...DEFAULT_SETTINGS};if(!isLocalPage)settings.server="global";saveSettings();syncSettingsInputs();if(dveView)dveView.setSettings(viewSettings());updateFlyHud();});
+
+function openInventoryDialog(){
+  refreshInventory();
+  $("inventory-dialog").showModal();
+}
+$("hud-inventory").addEventListener("click",openInventoryDialog);
+$("hud-studio").addEventListener("click",()=>$("studio-dialog").showModal());
+$("hud-fly").addEventListener("click",toggleFlyMode);
+document.querySelectorAll("dialog").forEach(d=>d.addEventListener("close",()=>{if(dveView)dveView.releaseInput();}));
+
+// ---- Shared world: server-authoritative 3D edit state --------------------------
+// Base terrain is generated identically by the server and the DVE terrain
+// mirror (dve/src/world.js ← backend/src/terrain.ts); worldEdits overlays the
+// player edits keyed "x,y,z" (block_id 'air' = dug out). The generator worker
+// fetches the initial edits from the API itself; this map exists so the walk
+// camera and live WS echo see the same state.
+const worldEdits=new Map();
+let headSeq=0,ws=null,wsRetry=0,dveView=null,dveMod=null;
+const lastWsFailed=()=>ws&&(ws.readyState===2||ws.readyState===3);
+function cellBlock(x,y,z){const o=worldEdits.get(`${x},${y},${z}`);return o!==undefined?o:dveMod.baseBlock(x,y,z);}
+// Single funnel for world edits: paint the voxel in the 3D view.
+function noteEdit(x,y,z,blockId){
+  worldEdits.set(`${x},${y},${z}`,blockId);
+  if(dveView)dveView.applyEdit(x,y,z,blockId);
+}
+async function loadWorldAll(){
+  const S=dveMod.SLAB;
   try{
-    const data=await api(`/api/world?x0=${camX()-4}&y0=${camY()-4}&x1=${camX()+COLS+4}&y1=${camY()+ROWS+4}&since=${headSeq}`);
-    for(const edit of data.edits)noteEdit(edit.x,edit.y,edit.block_id);
-    for(const entry of data.log)noteEdit(entry.x,entry.y,entry.block_id);
+    const data=await api(`/api/world?x0=${S.X0}&y0=${S.Y0}&z0=${S.Z0}&x1=${S.X1-1}&y1=${S.Y1-1}&z1=${S.Z1-1}&since=${headSeq}`);
+    for(const edit of data.edits)noteEdit(edit.x,edit.y,edit.z,edit.block_id);
+    for(const entry of data.log)noteEdit(entry.x,entry.y,entry.z,entry.block_id);
     headSeq=Math.max(headSeq,data.head);
     setConnection(true);
   }catch{setConnection(false);}
-  drawWorld();
-}
-// Single funnel for world edits so the 3D view (when open) mirrors the same
-// server-authoritative state the 2D canvas shows.
-function noteEdit(x,y,blockId){
-  worldEdits.set(`${x},${y}`,blockId);
-  if(dveView)dveView.applyEdit(x,y,blockId);
 }
 function connectLive(){
   ws=new WebSocket(API_BASE.replace(/^http/,"ws")+"/api/world/live");
-  ws.onopen=()=>{wsRetry=0;};
-  ws.onmessage=event=>{try{const m=JSON.parse(event.data);if(m.type==="edit"){noteEdit(m.x,m.y,m.block_id);drawWorld();}}catch{/* ignore non-JSON frames */}};
-  ws.onclose=()=>{setTimeout(connectLive,Math.min(15000,500*2**wsRetry++));};
+  ws.onopen=()=>{wsRetry=0;setConnection(true);};
+  ws.onmessage=event=>{try{const m=JSON.parse(event.data);if(m.type==="edit")noteEdit(m.x,m.y,m.z,m.block_id);}catch{/* ignore non-JSON frames */}};
+  ws.onclose=()=>{setConnection(false);setTimeout(connectLive,Math.min(15000,500*2**wsRetry++));};
   ws.onerror=()=>{try{ws.close();}catch{/* already closed */}};
 }
 // While the socket is down, polling (since=headSeq) fills the gap.
-setInterval(()=>{try{if(!ws||ws.readyState>1)loadWorld();}catch{loadWorld();}},4000);
+setInterval(()=>{if(!ws||ws.readyState>1)loadWorldAll();},4000);
 
-async function worldAction(button,x,y){
+async function worldAction(button,x,y,z){
   if(!authenticated){openAuth("login");toast("Log in to build in the shared world.");return;}
   try{
-    if(button===2||button===1){
-      const data=await api("/api/world/break",{method:"POST",body:JSON.stringify({x,y})});
-      toast(`Broke ${data.dropped} at ${x},${y} — +1 item.`);
+    if(button===2){
+      const data=await api("/api/world/break",{method:"POST",body:JSON.stringify({x,y,z})});
+      toast(`Broke ${data.dropped} at ${x} ${y} ${z} — +1 item.`);
     }else{
-      if(!selectedItem){toast("Pick an item from your inventory first (click it).",true);return;}
-      await api("/api/world/place",{method:"POST",body:JSON.stringify({x,y,item_id:selectedItem})});
-      toast(`Placed ${selectedItem} at ${x},${y}.`);
+      if(!selectedItem){toast("Pick an item from your inventory or hotbar first.",true);return;}
+      await api("/api/world/place",{method:"POST",body:JSON.stringify({x,y,z,item_id:selectedItem})});
+      toast(`Placed ${selectedItem} at ${x} ${y} ${z}.`);
     }
     await refreshInventory();
   }catch(err){toast(err.message,true);}
 }
-async function handleWorldPointer(button,clientX,clientY){
-  const rect=canvas.getBoundingClientRect();
-  const x=camX()+Math.floor((clientX-rect.left)*canvas.width/rect.width/TILE);
-  const y=camY()+Math.floor((clientY-rect.top)*canvas.height/rect.height/TILE);
-  await worldAction(button,x,y);
+
+// ---- Fullscreen 3D game (Divine Voxel Engine, ./dve/dist/) -------------------
+// Server-authoritative: every click goes through /api/world/place|break and
+// paints via the WS echo (noteEdit → applyEdit). The DVE module handles look
+// (pointer lock or drag), WASD walk/fly, and picking.
+async function initGameView(){
+  if(!window.WebGLRenderingContext)throw new Error("WebGL unavailable in this browser");
+  dveView=await dveMod.createDVEView($("game-canvas"),currentBlocks,API_BASE,{
+    settings:viewSettings(),
+    cellAt:(x,y,z)=>cellBlock(x,y,z),
+  });
+  $("game-loading").hidden=true;
 }
-canvas.addEventListener("pointerdown",e=>handleWorldPointer(e.button,e.clientX,e.clientY));
-canvas.addEventListener("contextmenu",e=>e.preventDefault());
+function failGame(err){
+  $("game-loading-text").textContent=`3D engine unavailable: ${err&&err.message||err}`;
+}
 
-let worldTimer;
-window.addEventListener("keydown",e=>{
-  if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","w","a","s","d","W","A","S","D"].includes(e.key)){
-    if(["INPUT","SELECT","TEXTAREA"].includes(document.activeElement.tagName))return;
-    e.preventDefault();const k=e.key.toLowerCase();
-    if(k==="w"||k==="arrowup")player.y--;if(k==="s"||k==="arrowdown")player.y++;
-    if(k==="a"||k==="arrowleft")player.x--;if(k==="d"||k==="arrowright")player.x++;
-    drawWorld();clearTimeout(worldTimer);worldTimer=setTimeout(loadWorld,350);
+function updateFlyHud(){
+  const flying=settings.mode==="fly";
+  $("hud-fly").innerHTML=`Fly: ${flying?"on":"off"} <small>F</small>`;
+  $("hud-mode").textContent=flying?"fly":"walk";
+  if($("set-mode").value!==settings.mode)$("set-mode").value=settings.mode;
+}
+function toggleFlyMode(){
+  settings.mode=settings.mode==="fly"?"walk":"fly";
+  saveSettings();
+  if(dveView)dveView.setSettings(viewSettings());
+  updateFlyHud();
+}
+
+// Click = action (break/place at the crosshair), press-and-move = look (the
+// DVE module handles look via pointer lock or drag; a click without movement
+// is the trigger here).
+let downAt=null,downButton=0;
+const gameCanvas=$("game-canvas");
+gameCanvas.addEventListener("contextmenu",e=>e.preventDefault());
+gameCanvas.addEventListener("pointerdown",e=>{downAt={x:e.clientX,y:e.clientY,t:Date.now()};downButton=e.button;});
+gameCanvas.addEventListener("pointerup",async e=>{
+  if(!downAt||e.button!==downButton){downAt=null;return;}
+  const moved=Math.abs(e.clientX-downAt.x)+Math.abs(e.clientY-downAt.y);
+  const quick=Date.now()-downAt.t<600;
+  downAt=null;
+  if(!dveView||moved>=8||!quick||e.button>2)return;
+  // In-game axis: left = break, right = place.
+  await gameAction(e.button===0?2:0);
+});
+async function gameAction(button){
+  let hit=null;
+  try{hit=await dveView.pickCenter();}catch{/* pick failed: treat as nothing in reach */}
+  if(!hit||!hit.position){toast("Nothing in reach — aim the crosshair at a block.",true);return;}
+  const cell=button===0?hit.normalPosition:hit.position; // place: the adjacent face; break: the hit block
+  const x=cell.x|0,y=cell.y|0,z=cell.z|0;
+  const S=dveMod.SLAB;
+  if(x<S.X0||x>=S.X1||y<S.Y0||y>=S.Y1||z<S.Z0||z>=S.Z1){toast("That is outside the world.",true);return;}
+  await worldAction(button,x,y,z);
+}
+
+// HUD: pose readout.
+setInterval(()=>{
+  if(dveView){
+    const p=dveView.pose;
+    $("hud-coords").textContent=`x ${Math.round(p.x)} · y ${Math.round(p.y)} · z ${Math.round(p.z)}`;
+  }
+},500);
+
+// Game keyboard: hotbar 1–9, dialogs, fly toggle. (Look/move keys live in the
+// DVE module's own listeners; this layer only opens UI.)
+document.addEventListener("keydown",e=>{
+  if(["INPUT","SELECT","TEXTAREA"].includes(document.activeElement.tagName))return;
+  if(document.querySelector("dialog[open]")){
+    if(e.key==="Escape")document.querySelector("dialog[open]").close(); // modals: Esc closes
+    return;
+  }
+  if(e.key==="Escape"){
+    if(document.pointerLockElement)document.exitPointerLock();
+    else openPause();
+    return;
+  }
+  if(e.key==="f"||e.key==="F"){toggleFlyMode();return;}
+  if(e.key==="e"||e.key==="E"||e.key==="i"||e.key==="I"){e.preventDefault();openInventoryDialog();return;}
+  if(e.key==="b"||e.key==="B"){e.preventDefault();$("studio-dialog").showModal();return;}
+  if(/^Digit[1-9]$/.test(e.code)){
+    const entries=Object.entries(inventory).sort(([a],[b])=>a.localeCompare(b)).slice(0,9);
+    const entry=entries[Number(e.code.slice(5))-1];
+    if(!entry)return;
+    selectItem(entry[0]===selectedItem?null:entry[0]);
   }
 });
 
-// ---- 3D view (Divine Voxel Engine, ./dve/dist/) ------------------------------
-// The 3D view renders the SAME server world as a slab cross-section. All edits
-// stay server-authoritative: clicks go through /api/world/place|break and come
-// back as live edits, never as direct voxel paints.
-$("open-3d-button").addEventListener("click",async()=>{
-  const overlay=$("view3d");
-  if(dveView){overlay.hidden=false;return;}
-  if(dveBusy)return;
-  dveBusy=true;overlay.hidden=false;$("view3d-status").textContent="starting engine…";
+// ---- Boot: straight into the game ---------------------------------------------
+async function boot(){
+  updateServerChip();
+  updateFlyHud();
+  updateAccountChip();
+  restoreSession();
+  connectLive();
   try{
-    if(!window.WebGLRenderingContext)throw new Error("WebGL unavailable in this browser");
     dveMod=await import("./dve/dist/dve-view.js");
-    dveView=await dveMod.createDVEView($("view3d-canvas"),currentBlocks,API_BASE);
-    $("view3d-status").textContent="live";
+    await refreshRegistry();      // textures come from the block registry
+    await loadWorldAll();         // player edits made before this session
+    await initGameView();
   }catch(err){
-    dveView=null;
-    $("view3d-status").textContent="3D view unavailable: "+(err&&err.message||err);
+    failGame(err);
   }
-  dveBusy=false;
-});
-$("view3d-close").addEventListener("click",()=>{$("view3d").hidden=true;});
-$("view3d-canvas").addEventListener("contextmenu",e=>e.preventDefault());
-$("view3d-canvas").addEventListener("pointerdown",async e=>{
-  if(!dveView||e.button>2)return;
-  const hit=await dveView.pickAt(e.clientX,e.clientY);
-  if(!hit)return;
-  const cell=(e.button===2||e.button===1)?hit.position:hit.normalPosition;
-  const x=cell.x|0,y=dveMod.y2d(cell.y|0);
-  if(x<dveMod.SLAB.X0||x>=dveMod.SLAB.X1||y<dveMod.SLAB.Y0||y>=dveMod.SLAB.Y1){
-    toast("That face is outside the shared world window.",true);return;
-  }
-  await worldAction(e.button,x,y);
-});
-
-drawWorld();updateAccountButton();renderInventory();refreshRegistry().then(loadWorld);connectLive();restoreSession();
+}
+boot();

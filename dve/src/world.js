@@ -1,21 +1,21 @@
 // Shared between the DVE main glue and its generator worker.
 //
-// The server world is a 2D grid (x, y-down, see backend/src/terrain.ts).
-// The 3D view extrudes that grid into a slab: x3d = x2d, y3d = Y1-1-y2d
-// (so "up" is up in 3D), z3d in [0, DEPTH). Player edits apply across the
-// whole depth — the 3D view is a cross-section of the same data the 2D
-// canvas shows, not a separate world.
+// World model v2: a Minecraft-style 3D world. The server generates base
+// terrain from the deterministic functions below (backend/src/terrain.ts is
+// the authoritative twin — keep them integer-identical) and stores only
+// player edits. y GROWS UPWARD from the bedrock floor at y=0.
 
+// The prototype world is finite: a walkable 96x96 column field, 32 tall.
+// Everything stays inside the vlox generation radius budget, so the whole
+// world is loaded around the spawn point.
 export const SLAB = {
-  X0: -64,
-  X1: 64,   // exclusive; X1-X0 must stay * Y1 = 4096 (world API window cap)
+  X0: -48,
+  X1: 48, // exclusive
   Y0: 0,
-  Y1: 32,
-  DEPTH: 16,
+  Y1: 32, // exclusive
+  Z0: -48,
+  Z1: 48, // exclusive
 };
-
-export const y3d = y2d => SLAB.Y1 - 1 - y2d;
-export const y2d = y3 => SLAB.Y1 - 1 - y3;
 
 // Voxel ids must not contain ":" (that separates named atlas tiles in vlox
 // texture ids), so block ids are namespaced with "__".
@@ -30,14 +30,74 @@ function hashU32(n) {
   return n >>> 0;
 }
 
-// MUST match backend/src/terrain.ts and the app.js mirror exactly.
-export function terrainHeight(x) {
-  return 10 + (hashU32(Math.floor(x / 4) ^ 0x51ed2701) % 6);
+const mod = (n, m) => ((n % m) + m) % m;
+
+// MUST match backend/src/terrain.ts exactly (integer-only arithmetic).
+function noise2(x, z, s) {
+  const gx = Math.floor(x / s);
+  const gz = Math.floor(z / s);
+  const wx = Math.floor((mod(x, s) * 8) / s);
+  const wz = Math.floor((mod(z, s) * 8) / s);
+  const c = (ix, iz) => hashU32((ix * 0x27d4eb2d) ^ (iz * 0x165667b1) ^ 0x51ed2701) % 16;
+  const a = c(gx, gz) * (8 - wx) * (8 - wz);
+  const b = c(gx + 1, gz) * wx * (8 - wz);
+  const d = c(gx, gz + 1) * (8 - wx) * wz;
+  const e = c(gx + 1, gz + 1) * wx * wz;
+  return (a + b + d + e) / 64;
 }
-export function baseBlock(x, y) {
-  const h = terrainHeight(x);
-  if (y < h) return "air";
+
+export function heightAt(x, z) {
+  const sum =
+    6 * noise2(x, z, 24) +
+    3 * noise2(x, z, 12) +
+    2 * noise2(x, z, 6) +
+    noise2(x, z, 3);
+  return 6 + Math.floor(sum / 12);
+}
+
+function hasTree(x, z) {
+  return hashU32((x * 0x9e3779b1) ^ (z * 0x85ebca77) ^ 0x2545f491) % 40 === 0;
+}
+
+function caveAt(x, y, z) {
+  const s = 8;
+  const gx = Math.floor(x / s);
+  const gy = Math.floor(y / s);
+  const gz = Math.floor(z / s);
+  const wx = mod(x, s), wy = mod(y, s), wz = mod(z, s);
+  const c = (ix, iy, iz) =>
+    hashU32((ix * 0x1b873593) ^ (iy * 0xcc9e2d51) ^ (iz * 0x165667b1) ^ 0x9e3779b3) % 16;
+  const n =
+    c(gx, gy, gz) * (8 - wx) * (8 - wy) * (8 - wz) +
+    c(gx + 1, gy, gz) * wx * (8 - wy) * (8 - wz) +
+    c(gx, gy + 1, gz) * (8 - wx) * wy * (8 - wz) +
+    c(gx + 1, gy + 1, gz) * wx * wy * (8 - wz) +
+    c(gx, gy, gz + 1) * (8 - wx) * (8 - wy) * wz +
+    c(gx + 1, gy, gz + 1) * wx * (8 - wy) * wz +
+    c(gx, gy + 1, gz + 1) * (8 - wx) * wy * wz +
+    c(gx + 1, gy + 1, gz + 1) * wx * wy * wz;
+  return n / 512 > 11;
+}
+
+export function baseBlock(x, y, z) {
+  if (y < 0 || y >= SLAB.Y1) return "air";
+  if (y === 0) return "builtin:bedrock";
+  const h = heightAt(x, z);
+  if (y > h) {
+    if (hasTree(x, z) && y <= h + 4) return "builtin:wood"; // trunk
+    for (let dx = -2; dx <= 2; dx++) {
+      for (let dz = -2; dz <= 2; dz++) {
+        if (dx === 0 && dz === 0) continue;
+        if (Math.abs(dx) + Math.abs(dz) > 2) continue;
+        if (!hasTree(x + dx, z + dz)) continue;
+        const h2 = heightAt(x + dx, z + dz);
+        if (y >= h2 + 3 && y <= h2 + 5) return "builtin:leaves";
+      }
+    }
+    return "air";
+  }
+  if (y < h && caveAt(x, y, z) && y > 1) return "air";
   if (y === h) return "builtin:grass";
-  if (y <= h + 3) return "builtin:dirt";
+  if (y >= h - 3) return "builtin:dirt";
   return "builtin:stone";
 }

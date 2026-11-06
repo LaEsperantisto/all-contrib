@@ -1,11 +1,11 @@
-// Generator thread: paints the deterministic terrain mirror plus the player
-// edits fetched from the world API. Coordinates: x3d = x2d, y3d = Y1-1-y2d,
-// z3d in [0, DEPTH). Sectors outside the slab stay empty.
+// Generator thread: paints the deterministic 3D terrain mirror plus the
+// player edits fetched from the world API. Coordinates are 1:1 with the
+// server (x, y-up, z). Sectors outside the world stay empty.
 import { StartGenerator } from "@divinevoxel/vlox/Init/StartGenerator";
 import { WorldGeneration } from "@divinevoxel/vlox/Tasks/WorldGeneration/WorldGeneration";
 import { WorldSpaces } from "@divinevoxel/vlox/World/WorldSpaces";
 import { Threads } from "@amodx/threads";
-import { SLAB, baseBlock, y2d, voxelIdFor } from "./world.js";
+import { SLAB, baseBlock, voxelIdFor } from "./world.js";
 
 // Diagnostics: count engine pipeline tasks on this thread, capture throws.
 const gcounts = {};
@@ -51,12 +51,12 @@ class ACWorldGen {
   async loadEdits() {
     this.edits = new Map();
     try {
-      const url = `${API_BASE}/api/world?x0=${SLAB.X0}&y0=${SLAB.Y0}&x1=${SLAB.X1 - 1}&y1=${SLAB.Y1 - 1}`;
+      const url = `${API_BASE}/api/world?x0=${SLAB.X0}&y0=${SLAB.Y0}&z0=${SLAB.Z0}&x1=${SLAB.X1 - 1}&y1=${SLAB.Y1 - 1}&z1=${SLAB.Z1 - 1}`;
       const res = await fetch(url);
       if (!res.ok) return;
       const data = await res.json();
       for (const edit of data.edits) {
-        if (edit.block_id !== "air") this.edits.set(`${edit.x},${edit.y}`, edit.block_id);
+        if (edit.block_id !== "air") this.edits.set(`${edit.x},${edit.y},${edit.z}`, edit.block_id);
       }
     } catch {
       // Offline API: render base terrain only. Live WS edits still arrive.
@@ -67,17 +67,17 @@ class ACWorldGen {
     if (!this.edits) await this.loadEdits();
     const b = WorldSpaces.sector.bounds;
     const xLo = Math.max(sx, SLAB.X0), xHi = Math.min(sx + b.x, SLAB.X1);
-    const zLo = Math.max(sz, 0), zHi = Math.min(sz + b.z, SLAB.DEPTH);
-    const yLo = Math.max(sy, 0), yHi = Math.min(sy + b.y, SLAB.Y1);
+    const zLo = Math.max(sz, SLAB.Z0), zHi = Math.min(sz + b.z, SLAB.Z1);
+    const yLo = Math.max(sy, SLAB.Y0), yHi = Math.min(sy + b.y, SLAB.Y1);
     if (xHi <= xLo || zHi <= zLo || yHi <= yLo) return;
     const brush = this.brush;
-    for (let y3 = yLo; y3 < yHi; y3++) {
-      const y = y2d(y3);
-      for (let x = xLo; x < xHi; x++) {
-        const id = this.edits.get(`${x},${y}`) ?? baseBlock(x, y);
-        if (id === "air") continue;
-        const voxel = voxelIdFor(id);
-        for (let z = zLo; z < zHi; z++) brush.setId(voxel).setXYZ(x, y3, z).paint();
+    for (let x = xLo; x < xHi; x++) {
+      for (let z = zLo; z < zHi; z++) {
+        for (let y = yLo; y < yHi; y++) {
+          const id = this.edits.get(`${x},${y},${z}`) ?? baseBlock(x, y, z);
+          if (id === "air") continue;
+          brush.setId(voxelIdFor(id)).setXYZ(x, y, z).paint();
+        }
       }
     }
   }
