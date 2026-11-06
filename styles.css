@@ -50,3 +50,30 @@
 .revoke-session{padding:8px 11px;font-size:10px;flex-shrink:0}
 .session-policy-note{font-size:10px;line-height:1.6;color:#758398;margin:7px 0 12px}
 @media(max-width:480px){.session-row{align-items:flex-start;flex-direction:column}.revoke-session{align-self:flex-end}}
+
+.inventory-item{cursor:pointer}.inventory-item.selected{background:rgba(139,114,232,.10);box-shadow:inset 3px 0 0 #8b72e8}
+
+/* 3D DVE view overlay */
+.view3d {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: #0c121b;
+  display: flex;
+  flex-direction: column;
+}
+.view3d[hidden] { display: none; }
+.view3d-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 18px;
+  background: #131a24;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: #e8edf5;
+  font-size: 14px;
+}
+.view3d-bar strong { color: #c5b7ff; }
+.view3d-bar #view3d-status { color: #8fa3bf; }
+.view3d-hint { flex: 1; color: #6f83a0; font-size: 12px; }
+#view3d-canvas { flex: 1; width: 100%; touch-action: none; outline: none; }

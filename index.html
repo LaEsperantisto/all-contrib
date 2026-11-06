@@ -29,9 +29,13 @@
         <div class="stats"><div><strong id="block-count">—</strong><span>registered blocks</span></div><div><strong id="recipe-count">—</strong><span>community recipes</span></div><div><strong>∞</strong><span>ideas to contribute</span></div></div>
       </div>
       <div class="world-card">
-        <div class="world-card-head"><span><i class="live-dot"></i> COMMUNITY WORLD</span><span class="tag">PROTOTYPE</span></div>
+        <div class="world-card-head"><span><i class="live-dot"></i> COMMUNITY WORLD</span><button id="open-3d-button" class="button button-outline" type="button">3D view</button></div>
         <canvas id="world-canvas" width="720" height="420" aria-label="Interactive voxel world demo"></canvas>
-        <div class="world-card-foot"><span>WASD / arrow keys to move</span><span id="player-position">x 0 · y 0</span></div>
+        <div class="world-card-foot"><span>Click: place selected · Right/Shift-click: break · WASD: move</span><span id="selected-item">no item selected</span><span id="player-position">x 0 · y 0</span></div>
+      </div>
+      <div id="view3d" class="view3d" hidden>
+        <div class="view3d-bar"><strong>3D world</strong><span id="view3d-status">starting engine…</span><span class="view3d-hint">Drag: orbit · Wheel: zoom · Click face: place selected · Right-click: break</span><button id="view3d-close" class="button button-outline" type="button">Close</button></div>
+        <canvas id="view3d-canvas"></canvas>
       </div>
     </section>
 
@@ -43,10 +47,10 @@
       <article class="panel inventory-panel">
         <div class="panel-title"><div class="icon-box violet">▤</div><div><h3>Inventory</h3><p>Your current item stacks</p></div><span id="inventory-total" class="panel-number">0 items</span></div>
         <form id="add-item-form" class="add-item-form">
-          <label>Block / item ID<input id="add-item-id" maxlength="128" placeholder="e.g. minecraft:stone" autocomplete="off" spellcheck="false" required></label>
+          <label>Block / item ID<input id="add-item-id" maxlength="128" placeholder="e.g. builtin:stone" autocomplete="off" spellcheck="false" required></label>
           <div class="form-row add-item-row"><label>Quantity<input id="add-item-quantity" type="number" min="1" max="999" value="16" required></label><button class="button button-primary add-item-button" type="submit">＋ Add test items</button></div>
         </form>
-        <p class="micro-note">Testing tool: any syntactically valid ID can be added, even if it is not in the registry. Inventory is saved in this browser only.</p>
+        <p class="micro-note">Testing tool: grants stacks to your account (server-side). Placing spends, breaking returns; IDs not in the registry cannot be placed.</p>
         <div class="inventory-list-heading"><span>ITEM</span><span>QUANTITY</span></div>
         <div id="inventory-list" class="inventory-list"><div class="empty">Your inventory is empty. Add an item ID above to begin.</div></div>
         <button id="clear-inventory-button" class="text-button" type="button">Clear inventory</button>
@@ -69,6 +73,10 @@
           <div class="form-row"><label>Hardness<input id="block-hardness" type="number" min="0" max="1000" step="0.1" value="2"></label><label>Light (0–15)<input id="block-light" type="number" min="0" max="15" value="0"></label></div>
           <label>Colour<input id="block-colour" type="color" value="#8b72e8" class="colour-input"></label>
           <label>Behaviour <span class="optional">safe, declarative</span><select id="block-behaviour"><option value="solid">Solid</option><option value="transparent">Transparent</option><option value="glowing">Glowing</option><option value="decorative">Decorative</option></select></label>
+          <div class="form-row">
+            <label>Support<select id="block-support"><option value="solid">Needs solid below</option><option value="any">Any empty cell</option><option value="none">Needs empty below</option></select></label>
+            <label>Incompatible IDs <span class="optional">comma-separated; placement refuses next to these</span><input id="block-incompatible" placeholder="builtin:stone, …" autocomplete="off" spellcheck="false"></label>
+          </div>
           <button class="button button-primary full" type="submit">Publish block <span>＋</span></button>
         </form>
         <p class="micro-note">No arbitrary code is executed. This prototype accepts safe block properties only.</p>
@@ -77,11 +85,11 @@
         <div class="panel-title"><div class="icon-box amber">⚒</div><div><h3>Recipe forge</h3><p>Make something new</p></div><span class="panel-number">02</span></div>
         <form id="recipe-form">
           <label>Recipe name<input id="recipe-name" maxlength="60" placeholder="e.g. Starstone brick" required></label>
-          <label>Ingredients <span class="optional">comma-separated item IDs; repeat IDs for extra quantity</span><input id="recipe-ingredients" placeholder="minecraft:stone, minecraft:coal" required></label>
+          <label>Ingredients <span class="optional">comma-separated item IDs; repeat IDs for extra quantity</span><input id="recipe-ingredients" placeholder="builtin:stone, builtin:wood" required></label>
           <div class="form-row"><label>Result block / item ID<input id="recipe-result" placeholder="player:yourname:starstone" required></label><label>Quantity<input id="recipe-quantity" type="number" min="1" max="999" value="1"></label></div>
           <button class="button button-primary full" type="submit">Publish recipe <span>＋</span></button>
         </form>
-        <p class="micro-note">Use full IDs, such as <code>minecraft:stone</code> or <code>player:username:block_id</code>. Recipes become available in the crafting table.</p>
+        <p class="micro-note">Use full IDs, such as <code>builtin:stone</code> or <code>player:username:block_id</code>. Recipes become available in the crafting table.</p>
       </article>
     </section>
 

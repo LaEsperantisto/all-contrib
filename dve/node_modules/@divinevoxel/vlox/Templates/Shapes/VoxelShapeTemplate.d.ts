@@ -1,0 +1,37 @@
+import { Flat3DIndex } from "@amodx/math";
+import { PaintVoxelData, RawVoxelData } from "../../Voxels";
+import { VoxelShapeTemplateData, VoxelShapeTemplateFillModes } from "./VoxelShapeTemplate.types";
+import { BoundingBox } from "@amodx/math/Geometry/Bounds/BoundingBox";
+import { IVoxelTemplate } from "../VoxelTemplates.types";
+import { IVoxelShapeSelection, IVoxelShapeSelectionData } from "./Selections/VoxelShapeSelection";
+import type { VoxelTemplateRegister } from "../VoxelTemplateRegister";
+export declare class VoxelShapeTemplate implements IVoxelTemplate<"shape", VoxelShapeTemplateData> {
+    static Register: typeof VoxelTemplateRegister;
+    static CreateNew(data: Partial<VoxelShapeTemplateData>): VoxelShapeTemplateData;
+    index: Flat3DIndex;
+    bounds: BoundingBox;
+    fillMode: VoxelShapeTemplateFillModes;
+    fillVoxel: PaintVoxelData;
+    faceVoxel: PaintVoxelData;
+    edgeVoxel: PaintVoxelData;
+    pointVoxel: PaintVoxelData;
+    _fillVoxel: RawVoxelData;
+    _faceVoxel: RawVoxelData;
+    _edgeVoxel: RawVoxelData;
+    _pointVoxel: RawVoxelData;
+    shapeSelection: IVoxelShapeSelection<any, IVoxelShapeSelectionData<any>>;
+    constructor(data?: VoxelShapeTemplateData);
+    inBounds(x: number, y: number, z: number): boolean;
+    setVoxels(fill: PaintVoxelData, face?: PaintVoxelData, edge?: PaintVoxelData, point?: PaintVoxelData): void;
+    getIndex(x: number, y: number, z: number): number;
+    isIncluded(index: number): boolean;
+    isAir(index: number): boolean;
+    getId(index: number): number;
+    getLight(index: number): number;
+    getLevel(index: number): number;
+    getSecondary(index: number): number;
+    getRaw(index: number, rawRef?: RawVoxelData): RawVoxelData;
+    clone(): VoxelShapeTemplate;
+    toJSON(): VoxelShapeTemplateData;
+    fromJSON(data: VoxelShapeTemplateData): void;
+}

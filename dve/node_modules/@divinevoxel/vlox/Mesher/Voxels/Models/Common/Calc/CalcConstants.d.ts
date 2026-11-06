@@ -1,0 +1,11 @@
+import { QuadVerticies } from "../../../../Geometry/Geometry.types";
+import { VoxelFaces } from "../../../../../Math";
+import { Vec4Array } from "@amodx/math";
+export declare const GradientCheckSets: Record<VoxelFaces, Record<QuadVerticies, number[]>>;
+export declare const GradientCheckSetsArray: Int8Array<ArrayBuffer>;
+export declare const GeometryCheckSetIndexes: Record<VoxelFaces, Record<QuadVerticies, [number, number, number]>>;
+export declare const CenterDirectionIndex: number;
+export declare const DirectionIndexes: Record<VoxelFaces, number>;
+export declare function shouldCauseFlip(topRight: number, topLeft: number, bottomLeft: number, bottomRight: number): boolean;
+export declare function getInterpolationValue(value: Vec4Array, weights: Vec4Array): number;
+export type QuadVertexWeights = [Vec4Array, Vec4Array, Vec4Array, Vec4Array];
