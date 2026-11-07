@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f3ead8">
   <title>All Contribute</title>
-  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./styles.css?v=2">
 </head>
 <body>
   <!-- The site IS the game: opening the page boots straight into the shared
        voxel world. HUD elements float on top; menus live in dialogs. -->
-  <div id="game">
+  <div id="game" hidden>
     <canvas id="game-canvas"></canvas>
     <div id="crosshair" aria-hidden="true"></div>
     <div class="hud-top">
@@ -20,15 +20,27 @@
     </div>
     <div id="hotbar"></div>
     <div class="hud-buttons">
+      <button id="hud-grab" class="button button-quiet" type="button" hidden>Grab cursor</button>
       <button id="hud-inventory" class="button button-quiet" type="button">Inventory <small>E</small></button>
       <button id="hud-studio" class="button button-quiet" type="button">Block manager <small>B</small></button>
       <button id="hud-menu" class="button button-quiet" type="button">Menu <small>Esc</small></button>
     </div>
     <div id="game-loading">
       <span id="game-loading-text">starting 3D engine…</span>
-      <p class="hero-keys">In game: <b>WASD</b> move · mouse look · <b>Space</b> jump · <b>1–9</b> hotbar · left-click break · right-click place · <b>E</b> inventory · <b>B</b> block manager · <b>Esc</b> menu</p>
+      <p class="hero-keys">In game: <b>WASD</b> move · <b>Shift</b> sprint · mouse look · <b>Space</b> jump · <b>1–9</b> hotbar · left-click break · right-click place · <b>E</b> inventory · <b>B</b> block manager · <b>Esc</b> menu</p>
     </div>
   </div>
+
+  <!-- Main menu: the landing screen. The game view only boots after Join. -->
+  <dialog id="main-menu" class="modal pause-modal">
+    <div class="modal-mark">A</div><span class="eyebrow">ALL CONTRIBUTE</span><h2>All Contribute</h2>
+    <p class="modal-sub">One shared, server-authoritative voxel world. Build it together.</p>
+    <div class="pause-menu">
+      <button id="mm-join" class="button button-primary full" type="button">Join global server</button>
+      <button id="mm-settings" class="button button-outline full" type="button">Settings</button>
+    </div>
+    <p class="micro-note"><span id="mm-server-chip">Server: global</span> · <span id="mm-account-chip">not signed in</span></p>
+  </dialog>
 
   <!-- Pause / main menu (Esc or the Menu button). -->
   <dialog id="pause-dialog" class="modal pause-modal">
@@ -39,6 +51,7 @@
       <button id="pause-inventory" class="button button-outline full" type="button">Inventory</button>
       <button id="pause-studio" class="button button-outline full" type="button">Block manager</button>
       <button id="pause-settings" class="button button-outline full" type="button">Settings</button>
+      <button id="pause-mainmenu" class="button button-outline full" type="button">Main menu</button>
       <button id="pause-account" class="button button-outline full" type="button">Account</button>
     </div>
     <p class="micro-note">The world is shared and server-authoritative: your edits land for every player. Log in (or create an account) to keep your inventory and creations.</p>
@@ -107,8 +120,12 @@
       <article class="panel">
         <div class="panel-title"><div class="icon-box violet">▦</div><div><h3 id="block-form-title">Block workshop</h3><p id="block-form-sub">Design a new block</p></div><span class="panel-number">01</span></div>
         <form id="block-form">
-          <label>Block name<input id="block-name" maxlength="40" placeholder="e.g. Starstone" required></label>
-          <label>Namespace / ID<input id="block-id" maxlength="48" placeholder="starstone" required pattern="[a-z0-9_:-]+"></label>
+          <label>Display name<input id="block-name" maxlength="40" placeholder="e.g. Starstone" required></label>
+          <div class="form-row">
+            <label>Namespace<input id="block-namespace" maxlength="24" placeholder="myns" required pattern="[A-Za-z0-9_]{1,24}"></label>
+            <label>Block ID<input id="block-id" maxlength="24" placeholder="starstone" required pattern="[A-Za-z0-9_]{1,24}"></label>
+          </div>
+          <p class="micro-note">Registry ID becomes <code id="block-id-preview">player:you:myns:starstone</code></p>
           <div class="form-row"><label>Hardness<input id="block-hardness" type="number" min="0" max="1000" step="0.1" value="2"></label><label>Light (0–15)<input id="block-light" type="number" min="0" max="15" value="0"></label></div>
           <label>Colour<input id="block-colour" type="color" value="#8b72e8" class="colour-input"></label>
           <label>Behaviour <span class="optional">safe, declarative</span><select id="block-behaviour"><option value="solid">Solid</option><option value="transparent">Transparent</option><option value="glowing">Glowing</option><option value="decorative">Decorative</option></select></label>
@@ -139,6 +156,6 @@
   </dialog>
 
   <div id="toast" role="status" class="toast"></div>
-  <script src="./app.js"></script>
+  <script src="./app.js?v=2"></script>
 </body>
 </html>

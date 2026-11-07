@@ -3,7 +3,8 @@
 // player enters the 3D game; the app owns placement/breaking through the API,
 // this module paints/erases voxels from server-authoritative edits and drives
 // the first-person camera (look + WASD + gravity/jump), nothing else.
-import { Engine, Scene, FreeCamera, Vector3, Color4 } from "@babylonjs/core";
+import { Engine, Scene, FreeCamera, Vector3, Color4, Matrix, MeshBuilder, Mesh, StandardMaterial, Color3, DynamicTexture, GlowLayer } from "@babylonjs/core";
+import { DVE_REV } from "./rev.js";
 import InitDVEBRClassic from "@divinevoxel/vlox-babylon/Init/Classic/InitDVEBRClassic";
 import { StartRenderer } from "@divinevoxel/vlox/Init/StartRenderer";
 import { VoxelBuildSpace } from "@divinevoxel/vlox/Builder/VoxelBuildSpace";
@@ -76,8 +77,16 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     }
     return EYE; // fully dug-out column: stand on the bedrock floor plane
   };
-  const camera = new FreeCamera("dve-cam", new Vector3(0.5, surfaceEye(0.5, 0.5), 0.5), scene);
-  camera.rotation.set(0.12, 0, 0);
+  // opts.spawn: optional { x, z, y?, yaw?, pitch? } — server-persisted
+  // respawn point; without it (or y) the player stands on the terrain
+  // surface at the spawn column.
+  const spawn = opts.spawn || {};
+  const spawnX = typeof spawn.x === "number" ? spawn.x : 0.5;
+  const spawnZ = typeof spawn.z === "number" ? spawn.z : 0.5;
+  const spawnY = typeof spawn.y === "number" ? spawn.y : surfaceEye(spawnX, spawnZ);
+  const camera = new FreeCamera("dve-cam", new Vector3(spawnX, spawnY, spawnZ), scene);
+  camera.rotation.set(typeof spawn.pitch === "number" ? spawn.pitch : 0.12,
+    typeof spawn.yaw === "number" ? spawn.yaw : 0, 0);
   camera.minZ = 0.08;
   camera.inertia = 0;
   camera.angularSensibility = 1e9; // we drive rotation ourselves (lock or drag)
@@ -172,7 +181,10 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
   const tick = () => {
     const dt = Math.min(0.1, engine.getDeltaTime() / 1000);
     camera.rotation.y = yaw; camera.rotation.x = pitch;
-    const speed = settings.speed * (keys.has("ControlLeft") || keys.has("ControlRight") ? 2 : 1);
+    // Hold Shift (or Ctrl) to sprint.
+    const sprint = keys.has("ShiftLeft") || keys.has("ShiftRight") ||
+      keys.has("ControlLeft") || keys.has("ControlRight");
+    const speed = settings.speed * (sprint ? 2 : 1);
     let mx = 0, mz = 0;
     if (keys.has("KeyW") || keys.has("ArrowUp")) mz += 1;
     if (keys.has("KeyS") || keys.has("ArrowDown")) mz -= 1;
@@ -197,6 +209,16 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
       else camera.position.z = Math.floor(nz - HALF) + 1 + HALF + 0.001;
     }
 
+    // Stuck recovery: a remote edit can paint a block into the body
+    // (mirror lag included). Stand on top of the highest overlapping solid
+    // instead of wobbling inside it.
+    const feetNow = camera.position.y - EYE;
+    if (bodyBlocked(camera.position.x, feetNow, camera.position.z)) {
+      let f = Math.floor(feetNow);
+      while (f < SLAB.Y1 && bodyBlocked(camera.position.x, f + 0.001, camera.position.z)) f++;
+      if (f < SLAB.Y1) { camera.position.y = f + EYE + 0.001; vy = 0; }
+    }
+
     if (keys.has("Space") && grounded) { vy = JUMP_V; grounded = false; }
     vy = Math.max(-MAX_FALL, vy - GRAVITY * dt);
     let ny = camera.position.y + vy * dt;
@@ -205,7 +227,11 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
         ny = Math.floor(ny - EYE) + 1 + EYE; // land: feet on the block top
         vy = 0;
       } else {
-        vy = 0; // head bump: undo the step
+        // Head bump: undo the step entirely. Advancing into the blocked
+        // cell (even briefly) put the body INSIDE the ceiling block, which
+        // then ejected the player through it on the next tick.
+        vy = 0;
+        ny = camera.position.y;
       }
     }
     camera.position.y = ny;
@@ -241,6 +267,41 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     });
   }
 
+  // ---- Glowing blocks --------------------------------------------------------
+  // The vlox light pipeline does not run here (faces would multiply by empty
+  // light data), so a block's registry `light` value is rendered the Babylon
+  // way: an emissive cube on the cell, collected into a GlowLayer bloom.
+  const glowLayer = new GlowLayer("glow", scene, { mainTextureSamples: 2 });
+  const glowInfo = new Map(); // voxel id -> { colour, light }
+  const glowMeshes = new Map(); // "x,y,z" -> Mesh
+  for (const b of blocks) {
+    const light = Number(b.light) || 0;
+    if (light > 0 && !glowInfo.has(voxelIdFor(b.id))) {
+      glowInfo.set(voxelIdFor(b.id), { colour: Color3.FromHexString(b.colour || "#ffffff"), light });
+    }
+  }
+  const syncGlow = (x, y, z, blockId) => {
+    const key = `${x},${y},${z}`;
+    const info = glowInfo.get(voxelIdFor(blockId || ""));
+    let m = glowMeshes.get(key);
+    if (!info) {
+      if (m) { m.dispose(); glowMeshes.delete(key); }
+      return;
+    }
+    if (!m) {
+      m = MeshBuilder.CreateBox("glow", { size: 1.001 }, scene);
+      m.position.set(x + 0.5, y + 0.5, z + 0.5);
+      const mat = new StandardMaterial("glow-mat", scene);
+      const k = 0.6 + 0.4 * (info.light / 15);
+      mat.emissiveColor = info.colour.scale(k);
+      mat.diffuseColor = info.colour.scale(0.01);
+      mat.disableLighting = true;
+      m.material = mat;
+      glowLayer.addIncludedOnlyMesh(m);
+      glowMeshes.set(key, m);
+    }
+  };
+
   const renderer = await InitDVEBRClassic({
     textureTypes: [],
     substances: [],
@@ -252,6 +313,7 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
   // postMessage, so hand it the API base through the worker URL fragment.
   const workerURL = name => {
     const url = new URL(`./${name}`, import.meta.url);
+    url.search = `h=${DVE_REV[name]}`;
     url.hash = encodeURIComponent(apiBase);
     return url;
   };
@@ -276,8 +338,116 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
   const buildSpace = new VoxelBuildSpace(DVER, rayProvider);
 
   let genCell = "";
+  // ---- Day-night cycle -------------------------------------------------------
+  // One in-game day = 24 real minutes, clocked off Date.now() so every client
+  // renders the same phase with zero sync traffic. Keyframes interpolate sky
+  // colour and scene brightness (the mesher is unlit, so brightness rides on
+  // Babylon's default image-processing colour transform).
+  const DAY_MS = 24 * 60 * 1000;
+  const SKY = [
+    // [t, r, g, b, brightness]
+    [0.00, 0.03, 0.05, 0.12, 0.30], // midnight
+    [0.22, 0.05, 0.07, 0.15, 0.40],
+    [0.28, 0.75, 0.45, 0.35, 0.80], // dawn
+    [0.35, 0.561, 0.662, 0.761, 1], // day
+    [0.70, 0.561, 0.662, 0.761, 1],
+    [0.76, 0.80, 0.40, 0.30, 0.75], // dusk
+    [0.82, 0.03, 0.05, 0.12, 0.30],
+    [1.00, 0.03, 0.05, 0.12, 0.30],
+  ];
+  const dayT = () => (Date.now() % DAY_MS) / DAY_MS;
+  const applyDayNight = () => {
+    const t = dayT();
+    let a = SKY[SKY.length - 2], b = SKY[SKY.length - 1];
+    for (let i = 0; i < SKY.length - 1; i++) {
+      if (t >= SKY[i][0] && t < SKY[i + 1][0]) { a = SKY[i]; b = SKY[i + 1]; break; }
+    }
+    const f = (t - a[0]) / (b[0] - a[0]);
+    const mix = (i) => a[i] + (b[i] - a[i]) * f;
+    scene.clearColor.set(mix(1), mix(2), mix(3), 1);
+    const L = mix(4);
+    scene.imageProcessingConfiguration.colorTransform = Matrix.FromArray([
+      L, 0, 0, 0,
+      0, L, 0, 0,
+      0, 0, L, 0,
+      0, 0, 0, 1,
+    ]);
+  };
+  // ---- Remote players --------------------------------------------------------
+  // Presence fan-out (WS "pose" frames from the WorldLive object) draws a
+  // simple blocky body + name card for every other player. Positions lerp
+  // toward the last pose so 5 Hz updates look smooth.
+  const remotes = new Map();
+  const ensureRemote = (name) => {
+    let r = remotes.get(name);
+    if (r) return r;
+    let hue = 7;
+    for (const ch of String(name)) hue = (hue * 31 + ch.charCodeAt(0)) % 360;
+    const col = Color3.FromHSV(hue, 0.55, 0.85);
+    const root = new Mesh("player", scene);
+    const part = (w, h, d, y, glow) => {
+      const m = MeshBuilder.CreateBox("part", { width: w, height: h, depth: d }, scene);
+      m.position.y = y;
+      m.parent = root;
+      const mat = new StandardMaterial("part-mat", scene);
+      mat.diffuseColor = col;
+      mat.emissiveColor = col.scale(glow);
+      m.material = mat;
+      return m;
+    };
+    part(0.5, 0.9, 0.3, 0.45, 0.25);   // legs
+    part(0.6, 0.55, 0.35, 1.22, 0.4);  // body
+    part(0.4, 0.35, 0.35, 1.67, 0.5);  // head
+    const label = MeshBuilder.CreatePlane("name", { width: Math.min(2.2, 0.25 + String(name).length * 0.13), height: 0.34 }, scene);
+    label.position.y = 2.15;
+    label.parent = root;
+    label.billboardMode = Mesh.BILLBOARDMODE_ALL;
+    const tex = new DynamicTexture("name-tex", { width: 256, height: 64 }, scene, true);
+    const ctx = tex.getContext();
+    ctx.clearRect(0, 0, 256, 64);
+    ctx.fillStyle = "rgba(20,20,30,0.55)";
+    ctx.fillRect(0, 8, 256, 48);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 30px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(String(name).slice(0, 24), 128, 34);
+    tex.update();
+    const lmat = new StandardMaterial("name-mat", scene);
+    lmat.emissiveTexture = tex;
+    lmat.opacityTexture = tex;
+    lmat.disableLighting = true;
+    label.material = lmat;
+    r = { root, rx: NaN, ry: 0, target: null, last: 0 };
+    remotes.set(name, r);
+    return r;
+  };
+  const advanceRemotes = () => {
+    const now = Date.now();
+    for (const [name, r] of remotes) {
+      if (now - r.last > 60_000) { // stale: player left or went silent
+        r.root.dispose(false, true);
+        remotes.delete(name);
+        continue;
+      }
+      if (!r.target) continue;
+      const t = r.target;
+      if (Number.isNaN(r.rx)) { r.rx = t.x; r.ry = t.yaw; }
+      r.rx += (t.x - r.rx) * 0.2;
+      const rz = r.root.position.z;
+      r.root.position.set(r.rx, t.y - EYE, rz + (t.z - rz) * 0.2);
+      let dy = t.yaw - r.ry;
+      while (dy > Math.PI) dy -= 2 * Math.PI;
+      while (dy < -Math.PI) dy += 2 * Math.PI;
+      r.ry += dy * 0.25;
+      r.root.rotation.y = r.ry;
+    }
+  };
+
   const frame = () => {
     tick();
+    applyDayNight();
+    advanceRemotes();
     // Chunk streaming: when the player crosses a 16-block cell, move the
     // world thread's generator focus so vlox re-rings its active sectors
     // (new chunks generate ahead, far ones drop out).
@@ -307,6 +477,13 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
       const id = blockId === "air" ? "dve_air" : voxelIdFor(blockId);
       const raw = PaintVoxelData.ToRaw(PaintVoxelData.Create({ id }));
       await DVER.threads.world.runTaskAsync("paint-direct", [[0, x, y, z], raw, id]);
+      syncGlow(x, y, z, blockId);
+      // Keep the generator's edit map current, so cells that activate AFTER
+      // this edit still generate the edited block (far-cell streaming).
+      try {
+        const gen = DVER.threads.generators.getThreads()[0];
+        if (gen) gen.runTaskAsync("note-edit", { x, y, z, block_id: blockId });
+      } catch { /* generator restart will re-fetch from the API anyway */ }
     },
 
     /**
@@ -338,6 +515,16 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
 
     /** Update live settings (sensitivity/fov/render distance/speed). */
     setSettings(next) { applySettings(next); },
+    /** Place or update a remote player's avatar from a presence pose frame. */
+    setRemote(name, x, y, z, yaw) {
+      const r = ensureRemote(name);
+      r.target = { x, y, z, yaw };
+      r.last = Date.now();
+    },
+    removeRemote(name) {
+      const r = remotes.get(name);
+      if (r) { r.root.dispose(false, true); remotes.delete(name); }
+    },
 
     /** Release input grabs when leaving the game screen. */
     releaseInput() {
@@ -346,9 +533,24 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
       if (document.pointerLockElement === canvas) document.exitPointerLock();
     },
 
+    /** Grab the cursor (pointer lock) for FPS look. False if refused. */
+    grabPointer() {
+      if (!canvas.requestPointerLock) return false;
+      try { canvas.requestPointerLock(); return true; } catch { return false; }
+    },
+
     /** Re-fit the engine after the game overlay is un-hidden. */
     resize() {
       engine.resize();
+    },
+
+    /** True when a block at (cx,cy,cz) would intersect the player body. */
+    bodyCellOverlap(cx, cy, cz) {
+      const p = camera.position;
+      const feet = p.y - EYE;
+      return cx + 1 > p.x - HALF && cx < p.x + HALF &&
+        cz + 1 > p.z - HALF && cz < p.z + HALF &&
+        cy + 1 > feet && cy < feet + HEIGHT;
     },
 
     /** Live camera state for the HUD. */

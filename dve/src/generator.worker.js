@@ -38,6 +38,7 @@ const API_BASE = decodeURIComponent(location.hash.slice(1));
 class ACWorldGen {
   static instance;
   edits = null;
+  pendingNotes = [];
 
   constructor() {
     if (ACWorldGen.instance) return ACWorldGen.instance;
@@ -56,11 +57,16 @@ class ACWorldGen {
       if (!res.ok) return;
       const data = await res.json();
       for (const edit of data.edits) {
-        if (edit.block_id !== "air") this.edits.set(`${edit.x},${edit.y},${edit.z}`, edit.block_id);
+        // 'air' edits (mined blocks) must override the base terrain too —
+        // dropping them re-rendered pre-join digs as solid.
+        this.edits.set(`${edit.x},${edit.y},${edit.z}`, edit.block_id);
       }
     } catch {
       // Offline API: render base terrain only. Live WS edits still arrive.
     }
+    // WS echoes that raced ahead of this fetch: replay them over the snapshot.
+    for (const n of this.pendingNotes) this.edits.set(`${n.x},${n.y},${n.z}`, n.block_id);
+    this.pendingNotes.length = 0;
   }
 
   async generate(dimension, sx, sy, sz) {
@@ -103,4 +109,13 @@ Threads.registerTask("gen-stats", () => {
   } catch {
     return [[gcounts, gerrs.slice(0, 8), binKeys, misses]];
   }
+});
+
+// Keep the generator's edit mirror current with the live world: cells that
+// generate AFTER an edit (far cells streamed in later) must see it too.
+Threads.registerTask("note-edit", (d) => {
+  const g = ACWorldGen.instance;
+  if (!g.edits) { g.pendingNotes.push(d); return [true]; }
+  g.edits.set(`${d.x},${d.y},${d.z}`, d.block_id);
+  return [true];
 });

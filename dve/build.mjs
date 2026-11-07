@@ -2,6 +2,8 @@
 // self-contained module workers. Run `npm install && npm run build` here, then
 // commit dist/ — the frontend itself stays build-step-free.
 import { build } from "esbuild";
+import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
 
 const shared = {
   bundle: true,
@@ -17,4 +19,16 @@ await build({ ...shared, entryPoints: ["src/world.worker.js"], outfile: "dist/wo
 await build({ ...shared, entryPoints: ["src/generator.worker.js"], outfile: "dist/generator.worker.js" });
 await build({ ...shared, entryPoints: ["src/mesher.worker.js"], outfile: "dist/mesher.worker.js" });
 
-console.log("dve view bundled → dist/");
+// Content-hash manifest so app.js and the view import/bundle workers with a
+// `?h=<hash>` URL: GitHub Pages serves stale cached bundles forever otherwise
+// (a browser that kept an old dve-view.js calls methods it never exported).
+const hash = f => createHash("sha256").update(readFileSync(`dist/${f}`)).digest("hex").slice(0, 10);
+const rev = {
+  "dve-view.js": hash("dve-view.js"),
+  "world.worker.js": hash("world.worker.js"),
+  "generator.worker.js": hash("generator.worker.js"),
+  "mesher.worker.js": hash("mesher.worker.js"),
+};
+writeFileSync("src/rev.js", `export const DVE_REV = ${JSON.stringify(rev)};\n`);
+
+console.log("dve view bundled → dist/", rev);

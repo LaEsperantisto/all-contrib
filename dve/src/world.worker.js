@@ -289,6 +289,11 @@ Threads.registerTask("move-generator", (pos) => {
 const bf = (sec, f) => { try { return sec.getBitFlag(Sector.FlagIds[f]); } catch { return false; } };
 const co = sec => { try { return sec.isCheckedOut(); } catch { return true; } };
 
+// Revocable fake gen-completion bookkeeping (see driveSlabPipeline apply()).
+const fakeDone = new Set();
+const realGen = new Set();
+const revoked = new Set();
+const stuckCounts = new Map();
 async function driveSlabPipeline() {
   const dim = WorldSimulation.getDimension(0);
   const seen = new Map();
@@ -324,15 +329,65 @@ async function driveSlabPipeline() {
     // buffer to generator threads (and snapshots) outside the stage queues,
     // so any idle-detected "stale" checkout may be a live transfer; forcing
     // it checked-in detaches buffers mid-flight and poisons later brush ops.
-    // Boundary safety net: sectors whose Moore ring can never fully activate
-    // (walking put them on the maxRadius edge) can never dispatch their gen
-    // task; their slab region is plain deterministic terrain, so mark gen
-    // done. Never touches sectors that are genuinely generating.
+    // Boundary safety net (revocable): sectors whose Moore ring can never
+    // fully activate (walking put them on the maxRadius edge) can never
+    // dispatch their gen task (generateUpdate gates on fullNeighbors), so
+    // mark gen done. When the ring shifts and such a sector regains a full
+    // active neighborhood, REVOKE the fake (and clear the _genAllDone
+    // cache) — otherwise it meshes as permanently empty terrain in front
+    // of the walking player (observed: 90-block walk delivered 2 new
+    // sections, mesh probe nz=2). generating is true for every active
+    // sector (generationRadius == maxRadius), so inner sectors never get
+    // re-faked after a revoke, and the open gate dispatches real gen.
     for (const s of sectors) {
       // Checked-out sectors live in a generator thread right now; their
       // world-side buffers are detached and touching flags detaches Atomics.
-      if (s.sector && !co(s.sector) && !(s.generating && s.fullNeighbors))
-        try { s.sector.setBitFlag(Sector.FlagIds.isWorldGenDone, true); } catch { /* mid-transfer */ }
+      if (s.sector && !co(s.sector) && !(s.generating && s.fullNeighbors) && !bf(s.sector, "isWorldGenDone")) {
+        const k = s.position[0] + "," + s.position[2];
+        const c = (stuckCounts.get(k) || 0) + 1;
+        stuckCounts.set(k, c);
+        // Only fake after the gate has been shut for ~4 consecutive passes
+        // (~2 s): fresh activations converge their Moore neighborhood on
+        // their own and never need a fake at all.
+        if (c >= 4)
+          try { s.sector.setBitFlag(Sector.FlagIds.isWorldGenDone, true); fakeDone.add(k); revoked.delete(k); } catch { /* mid-transfer */ }
+      }
+    }
+    for (const [k, c] of stuckCounts) if (!now.has(k)) stuckCounts.delete(k);
+    for (const s of sectors) {
+      if (!s.sector || co(s.sector)) continue;
+      const k = s.position[0] + "," + s.position[2];
+      if (bf(s.sector, "isWorldGenDone")) {
+        // Flag up: fake (pending revoke) or real generation. A revoked fake
+        // whose flag came back is real generation completing.
+        if (revoked.has(k)) { fakeDone.delete(k); revoked.delete(k); realGen.add(k); }
+        else if (!fakeDone.has(k)) realGen.add(k);
+        continue;
+      }
+      // Flag down. A revoked fake that regained its neighborhood is on the
+      // normal gen path — leave it. Fresh cells that were never generated
+      // must NOT be flagged: the simulation will dispatch them.
+      if (fakeDone.has(k) && revoked.has(k) === false) revoked.add(k);
+    }
+    // A fake-completed sector whose Moore neighborhood has since become
+    // fully active (ring shifted inward) gets its fake revoked: clear the
+    // gen flag + _genAllDone cache so generateUpdate dispatches a real gen
+    // task and the terrain actually paints.
+    for (const s of sectors) {
+      const k = s.position[0] + "," + s.position[2];
+      if (!fakeDone.has(k) || revoked.has(k) || !s.fullNeighbors) continue;
+      if (!s.sector || co(s.sector)) continue;
+      try {
+        s.sector.setBitFlag(Sector.FlagIds.isWorldGenDone, false);
+        s._genAllDone = false;
+        revoked.add(k);
+      } catch { /* mid-transfer; retry next pass */ }
+    }
+    {
+      const live = now;
+      for (const k of fakeDone) if (!live.has(k)) fakeDone.delete(k);
+      for (const k of realGen) if (!live.has(k)) realGen.delete(k);
+      for (const k of revoked) if (!live.has(k)) revoked.delete(k);
     }
     // The decor/prop/sun dispatch waves structurally stall one ring inside
     // the max circle: ring-edge gates can never open (inactive outside
@@ -482,8 +537,11 @@ Threads.registerTask("debug-state", async () => {
           } catch { /* freed */ }
         }
         out.stuck = out.stuck.slice(0, 20);
-        out.meshProbe = dim.activeSectors._sectors.slice(0, 8).map(s => {
-          if (!s.sector) return "nolink";
+        out.meshProbe = (mainGenerator ? [1, 2, 3].map(k => {
+          const gp = mainGenerator.position;
+          const cx = Math.floor(gp.x / 16) * 16, cz = Math.floor(gp.z / 16) * 16;
+          const s = dim.activeSectors.get(cx, 0, cz - k * 16);
+          if (!s || !s.sector) return "nolink " + JSON.stringify([cx, 0, cz - k]);
           let nz = 0, mm = 0;
           for (const sec of s.sector.sections) {
             const ids = sec.ids;
@@ -491,8 +549,8 @@ Threads.registerTask("debug-state", async () => {
             const q = sec.getMinMax();
             if (Math.abs(q[0]) !== Infinity) mm++;
           }
-          return "nz=" + nz + " mm=" + mm + " " + JSON.stringify(s.position);
-        });
+          return "nz=" + nz + " mm=" + mm + " f=" + (s.fullNeighbors ? 1 : 0) + " g=" + (bf(s.sector, "isWorldGenDone") ? 1 : 0) + " " + JSON.stringify(s.position);
+        }) : []).filter(Boolean);
         out.genFlags = dim.activeSectors._sectors.slice(0, 60).map(s => {
           const g = s.sector ? (bf(s.sector, "isWorldGenDone") ? 1 : 0) : "-";
           const su = s.sector ? (bf(s.sector, "isWorldSunDone") ? 1 : 0) : "-";
@@ -516,6 +574,18 @@ Threads.registerTask("debug-state", async () => {
           (n.sector ? (n.sector.getBitFlag(Sector.FlagIds.isWorldGenDone) ? "G" : "g") + (n.sector.getBitFlag(Sector.FlagIds.isWorldDecorDone) ? "D" : "d") : ""));
       }
     }
+    out.fd = fakeDone.size;
+    out.rg = realGen.size;
+    out.rv = revoked.size;
+    out.rk = stuckCounts.size;
+    out.genT = { n: ((DVEW.threads.generators && DVEW.threads.generators.getThreads) ? DVEW.threads.generators.getThreads().length : -1) };
+    try {
+      const gt = DVEW.threads.generators.getThreads()[0];
+      out.genStats = await Promise.race([
+        gt.runTaskAsync("gen-stats", []),
+        new Promise((_, j) => setTimeout(() => j("timeout"), 2500)),
+      ]);
+    } catch (e) { out.genStats = "ERR:" + String((e && e.message) || e).slice(0, 140); }
     out.dispatch = dispatchCounts;
     out.werrs = werrs;
     out.queues = {};

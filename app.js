@@ -22,6 +22,7 @@ function updateServerChip() {
   const label = settings.server === "local" && isLocalPage ? "Server: local dev" : "Server: global";
   $("hud-server").textContent = label.toLowerCase();
   $("pause-server-chip").textContent = label;
+  $("mm-server-chip").textContent = label;
 }
 // Sensitivity slider 1..10 → radians per pixel; FOV degrees → Babylon vertical rad.
 const viewSettings = () => ({
@@ -127,6 +128,7 @@ function setConnection(online) {
 function updateAccountChip(){
   const label = authenticated && username ? username : "not signed in";
   $("pause-account-chip").textContent = label;
+  $("mm-account-chip").textContent = label;
   $("pause-account").textContent = authenticated && username ? "Account" : "Log in / Register";
 }
 function setAuthenticatedUser(name){
@@ -303,7 +305,7 @@ function renderHotbar(){
   $("hotbar").innerHTML=entries.map(([id,quantity],i)=>{
     const block=blockById(id);const colour=block&&/^#[0-9a-f]{6}$/i.test(block.colour)?block.colour:"#64748b";
     const selected=id===selectedItem?" hotbar-selected":"";
-    return `<div class="hotbar-slot${selected}" data-slot-id="${escapeAttr(id)}" title="${escapeAttr(id)}"><span class="hotbar-key">${i+1}</span><span class="swatch" style="background:${escapeAttr(colour)}"></span><span class="hotbar-qty">${quantity}</span></div>`;
+    return `<div class="hotbar-slot${selected}" data-slot-id="${escapeAttr(id)}" title="${escapeAttr(block?block.name+" — "+id:id)}"><span class="hotbar-key">${i+1}</span><span class="swatch" style="background:${escapeAttr(colour)}"></span><span class="hotbar-qty">${quantity}</span></div>`;
   }).join("");
 }
 $("hotbar").addEventListener("click",e=>{
@@ -360,9 +362,9 @@ $("block-form").addEventListener("submit",async e=>{
       toast(`Block ${editingBlockId} updated.`);
       exitEditMode();
     }else{
-      await api("/api/blocks",{method:"POST",body:JSON.stringify({...common,id:$("block-id").value})});
+      await api("/api/blocks",{method:"POST",body:JSON.stringify({...common,namespace:$("block-namespace").value,id:$("block-id").value})});
       toast("Block published to the registry. It becomes placeable immediately; textures reload on next visit.");
-      e.target.reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";
+      e.target.reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";updateIdPreview();
     }
     await refreshRegistry();
   }
@@ -371,13 +373,15 @@ $("block-form").addEventListener("submit",async e=>{
 function enterEditMode(block){
   editingBlockId=block.id;
   pendingDelete.clear();
-  const localId=block.id.startsWith("player:")?block.id.split(":").slice(2).join(":"):block.id;
+  const parts=block.id.split(":");
+  const namespace=block.id.startsWith("player:")?parts[2]:"";
+  const localId=block.id.startsWith("player:")?parts.slice(3).join(":"):block.id;
   let rules={};try{rules=JSON.parse(block.rules_json||"{}");}catch{/* defaults below */}
-  $("block-name").value=block.name;$("block-id").value=localId;
+  $("block-name").value=block.name;$("block-namespace").value=namespace;$("block-id").value=localId;
   $("block-hardness").value=block.hardness;$("block-light").value=block.light;$("block-colour").value=block.colour;
   $("block-behaviour").value=block.behaviour;$("block-support").value=rules.support||"solid";
   $("block-incompatible").value=(rules.incompatibleWith||[]).join(", ");
-  $("block-id").readOnly=true;
+  $("block-namespace").readOnly=true;$("block-id").readOnly=true;
   $("block-edit-note").hidden=false;$("block-edit-id").textContent=block.id;
   $("block-form-title").textContent="Edit block";$("block-form-sub").textContent="Changes apply to the live registry.";
   $("block-submit").textContent="Save changes";
@@ -385,12 +389,21 @@ function enterEditMode(block){
 }
 function exitEditMode(){
   editingBlockId=null;
-  $("block-id").readOnly=false;
+  $("block-namespace").readOnly=false;$("block-id").readOnly=false;
   $("block-edit-note").hidden=true;
   $("block-form-title").textContent="Block workshop";$("block-form-sub").textContent="Design a new block";
   $("block-submit").innerHTML='Publish block <span>＋</span>';
-  $("block-form").reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";
+  $("block-form").reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";updateIdPreview();
 }
+// Live registry-ID preview: player:USERNAME:NAMESPACE:BLOCKNAME.
+function updateIdPreview(){
+  const user=(username||"you").toLowerCase();
+  const ns=($("block-namespace").value.trim()||"myns").toLowerCase();
+  const id=($("block-id").value.trim()||"starstone").toLowerCase();
+  $("block-id-preview").textContent=`player:${user}:${ns}:${id}`;
+}
+$("block-namespace").addEventListener("input",updateIdPreview);
+$("block-id").addEventListener("input",updateIdPreview);
 $("block-edit-cancel").addEventListener("click",exitEditMode);
 function renderMyBlocks(){
   const list=$("my-blocks-list");
@@ -415,7 +428,7 @@ $("my-blocks-list").addEventListener("click",async e=>{
     if(editingBlockId===id)exitEditMode();
     if(selectedItem===id)selectItem(null);
     await Promise.all([refreshRegistry(),refreshInventory()]);
-    toast(`Block ${id} removed from the registry.`);
+    toast(`Block ${id} removed — placed copies cleared from the world.`);
   }catch(err){pendingDelete.delete(id);renderMyBlocks();toast(err.message,true);}
 });
 
@@ -445,6 +458,16 @@ function openPause(){
 }
 $("pause-resume").addEventListener("click",()=>$("pause-dialog").close());
 $("pause-settings").addEventListener("click",()=>{syncSettingsInputs();$("settings-dialog").showModal();});
+$("pause-mainmenu").addEventListener("click",()=>{
+  // Open the landing first so the pause-close handler never re-grabs the
+  // cursor, then tear the game screen down around the live engine.
+  updateServerChip();updateAccountChip();
+  $("main-menu").showModal();
+  $("pause-dialog").close();
+  if(dveView)dveView.releaseInput();
+  $("game").hidden=true;
+  syncGrabBtn();
+});
 $("pause-inventory").addEventListener("click",openInventoryDialog);
 $("pause-studio").addEventListener("click",()=>$("studio-dialog").showModal());
 $("hud-menu").addEventListener("click",openPause);
@@ -467,7 +490,19 @@ function openInventoryDialog(){
 }
 $("hud-inventory").addEventListener("click",openInventoryDialog);
 $("hud-studio").addEventListener("click",()=>$("studio-dialog").showModal());
-document.querySelectorAll("dialog").forEach(d=>d.addEventListener("close",()=>{if(dveView)dveView.releaseInput();}));
+document.querySelectorAll("dialog").forEach(d=>d.addEventListener("close",()=>{
+  // Exiting any menu back into the game re-grabs the cursor (best effort:
+  // Chrome may refuse right after an Esc-exit — the HUD button covers it).
+  if(dveView&&!document.querySelector("dialog[open]"))dveView.grabPointer();
+}));
+
+// Cursor-grab button: visible only while the game is up and the cursor is
+// free, so the player can hand the mouse back to the game after any release.
+const grabBtn=$("hud-grab");
+function syncGrabBtn(){grabBtn.hidden=!!document.pointerLockElement||!dveView||$("game").hidden;}
+document.addEventListener("pointerlockchange",syncGrabBtn);
+setInterval(syncGrabBtn,500);
+grabBtn.addEventListener("click",()=>{if(dveView)dveView.grabPointer();});
 
 // ---- Shared world: server-authoritative 3D edit state --------------------------
 // Base terrain is generated identically by the server and the DVE terrain
@@ -496,11 +531,27 @@ async function loadWorldAll(){
 }
 function connectLive(){
   ws=new WebSocket(API_BASE.replace(/^http/,"ws")+"/api/world/live");
-  ws.onopen=()=>{wsRetry=0;setConnection(true);};
-  ws.onmessage=event=>{try{const m=JSON.parse(event.data);if(m.type==="edit")noteEdit(m.x,m.y,m.z,m.block_id);}catch{/* ignore non-JSON frames */}};
+  ws.onopen=()=>{wsRetry=0;setConnection(true);sendPresence(true);};
+  ws.onmessage=event=>{try{const m=JSON.parse(event.data);
+    if(m.type==="edit")noteEdit(m.x,m.y,m.z,m.block_id);
+    else if(m.type==="roster")for(const p of m.players||[])if(dveView&&p.name!==username)dveView.setRemote(p.name,p.x,p.y,p.z,p.yaw);
+    else if(m.type==="pose"&&dveView&&m.name!==username)dveView.setRemote(m.name,m.x,m.y,m.z,m.yaw);
+    else if(m.type==="leave"&&dveView)dveView.removeRemote(m.name);
+  }catch{/* ignore non-JSON frames */}};
   ws.onclose=()=>{setConnection(false);setTimeout(connectLive,Math.min(15000,500*2**wsRetry++));};
   ws.onerror=()=>{try{ws.close();}catch{/* already closed */}};
 }
+// Presence: advertise our pose ~4 Hz over the same socket (name identifies
+// the player; the server fans poses out to everyone else).
+let presenceAt=0;
+function sendPresence(force){
+  if(!ws||ws.readyState!==1||!dveView)return;
+  const p=dveView.pose;
+  if(!force&&Date.now()-presenceAt<250)return;
+  presenceAt=Date.now();
+  try{ws.send(JSON.stringify({type:"pose",name:username||"someone",x:p.x,y:p.y,z:p.z,yaw:p.yaw}));}catch{/* racing a close */}
+}
+setInterval(sendPresence,250);
 // While the socket is down, polling (since=headSeq) fills the gap.
 setInterval(()=>{if(!ws||ws.readyState>1)loadWorldAll();},4000);
 
@@ -525,11 +576,30 @@ async function worldAction(button,x,y,z){
 // (pointer lock or drag), WASD walking with gravity + Space jump, and picking.
 async function initGameView(){
   if(!window.WebGLRenderingContext)throw new Error("WebGL unavailable in this browser");
+  let spawn=null;
+  try{const r=await api("/api/player/state");spawn=r.state;}catch{/* default spawn on surface */}
   dveView=await dveMod.createDVEView($("game-canvas"),currentBlocks,API_BASE,{
     settings:viewSettings(),
     cellAt:(x,y,z)=>cellBlock(x,y,z),
+    spawn:spawn||undefined,
   });
   $("game-loading").hidden=true;
+  startStateSaver();
+  // Presence: advertise ourselves and pull the current roster of players.
+  if(ws&&ws.readyState===1){try{ws.send(JSON.stringify({type:"who"}));}catch{}sendPresence(true);}
+}
+// Persist position/look every 2s while the pose moves; restored on rejoin.
+let stateTimer=null,lastSavedPose="";
+function startStateSaver(){
+  clearInterval(stateTimer);
+  stateTimer=setInterval(async()=>{
+    if(!authenticated||!dveView)return;
+    const p=dveView.pose;
+    const key=`${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}`;
+    if(key===lastSavedPose)return;
+    lastSavedPose=key;
+    try{await api("/api/player/state",{method:"POST",body:JSON.stringify({x:p.x,y:p.y,z:p.z,yaw:p.yaw,pitch:p.pitch})});}catch{/* retried next tick */}
+  },2000);
 }
 function failGame(err){
   $("game-loading-text").textContent=`3D engine unavailable: ${err&&err.message||err}`;
@@ -562,6 +632,7 @@ async function gameAction(button){
   const x=cell.x|0,y=cell.y|0,z=cell.z|0;
   const S=dveMod.SLAB;
   if(x<S.X0||x>=S.X1||y<S.Y0||y>=S.Y1||z<S.Z0||z>=S.Z1){toast("That is outside the world.",true);return;}
+  if(button===0&&dveView.bodyCellOverlap(x,y,z)){toast("That block would be inside you.",true);return;}
   await worldAction(button,x,y,z);
 }
 
@@ -586,8 +657,8 @@ document.addEventListener("keydown",e=>{
     else openPause();
     return;
   }
-  if(e.key==="e"||e.key==="E"||e.key==="i"||e.key==="I"){e.preventDefault();openInventoryDialog();return;}
-  if(e.key==="b"||e.key==="B"){e.preventDefault();$("studio-dialog").showModal();return;}
+  if(e.key==="e"||e.key==="E"||e.key==="i"||e.key==="I"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();openInventoryDialog();return;}
+  if(e.key==="b"||e.key==="B"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();$("studio-dialog").showModal();return;}
   if(/^Digit[1-9]$/.test(e.code)){
     const entries=Object.entries(inventory).sort(([a],[b])=>a.localeCompare(b)).slice(0,9);
     const entry=entries[Number(e.code.slice(5))-1];
@@ -596,19 +667,36 @@ document.addEventListener("keydown",e=>{
   }
 });
 
-// ---- Boot: straight into the game ---------------------------------------------
+// ---- Boot: main menu first; Join starts the game -----------------------------
 async function boot(){
   updateServerChip();
   updateAccountChip();
   restoreSession();
   connectLive();
-  try{
-    dveMod=await import("./dve/dist/dve-view.js");
-    await refreshRegistry();      // textures come from the block registry
-    await loadWorldAll();         // player edits made before this session
-    await initGameView();
-  }catch(err){
-    failGame(err);
-  }
+  $("mm-join").textContent = settings.server === "local" && isLocalPage ? "Join local server" : "Join global server";
+  $("main-menu").addEventListener("cancel", e => e.preventDefault()); // landing stays until Join
+  $("mm-join").addEventListener("click", async () => {
+    $("main-menu").close();
+    $("game").hidden = false;
+    if (dveView) {           // returning from the game to the menu and back
+      dveView.resize();
+      dveView.grabPointer();
+      return;
+    }
+    try {
+      const { DVE_REV } = await import("./dve/src/rev.js");
+      dveMod = await import(`./dve/dist/dve-view.js?h=${DVE_REV["dve-view.js"]}`);
+      await refreshRegistry();      // textures come from the block registry
+      await loadWorldAll();         // player edits made before this session
+      await initGameView();
+      dveView.grabPointer();        // cursor goes to the game (user gesture)
+    } catch (err) {
+      failGame(err);
+      $("game").hidden = true;
+      $("main-menu").showModal();
+    }
+  });
+  $("mm-settings").addEventListener("click", () => { syncSettingsInputs(); $("settings-dialog").showModal(); });
+  $("main-menu").showModal();
 }
 boot();
