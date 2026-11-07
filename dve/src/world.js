@@ -5,16 +5,18 @@
 // the authoritative twin — keep them integer-identical) and stores only
 // player edits. y GROWS UPWARD from the bedrock floor at y=0.
 
-// The prototype world is finite: a walkable 96x96 column field, 32 tall.
-// Everything stays inside the vlox generation radius budget, so the whole
-// world is loaded around the spawn point.
+// The prototype world is a walkable 256x256 column field, 32 tall — far
+// larger than vlox's generator radius budget (render 48 / gen 64 / max 80),
+// so only the area around the player exists: the generator focus follows the
+// player and chunks stream in and out as they walk (see world.worker.js
+// "move-generator").
 export const SLAB = {
-  X0: -48,
-  X1: 48, // exclusive
+  X0: -128,
+  X1: 128, // exclusive
   Y0: 0,
   Y1: 32, // exclusive
-  Z0: -48,
-  Z1: 48, // exclusive
+  Z0: -128,
+  Z1: 128, // exclusive
 };
 
 // Voxel ids must not contain ":" (that separates named atlas tiles in vlox

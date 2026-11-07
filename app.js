@@ -4,13 +4,14 @@
 const $ = (id) => document.getElementById(id);
 
 // ---- Settings + server selection ------------------------------------------------
-const DEFAULT_SETTINGS = { server: "global", sens: 5, fov: 80, distance: 900, speed: 8, mode: "walk" };
+const DEFAULT_SETTINGS = { server: "global", sens: 5, fov: 80, distance: 900, speed: 8 };
 let settings = { ...DEFAULT_SETTINGS };
 try {
   const raw = JSON.parse(localStorage.getItem("ac_settings") || "{}");
   if (raw && typeof raw === "object") settings = { ...settings, ...raw };
 } catch { /* defaults */ }
 if (!["global", "local"].includes(settings.server)) settings.server = "global";
+delete settings.mode; delete settings.flySpeed; // legacy keys from older builds
 function saveSettings() { localStorage.setItem("ac_settings", JSON.stringify(settings)); }
 const isLocalPage = ["localhost", "127.0.0.1"].includes(location.hostname);
 if (!isLocalPage) settings.server = "global"; // https page → http dev API is mixed content
@@ -28,8 +29,6 @@ const viewSettings = () => ({
   fov: settings.fov * Math.PI / 180 * 0.72,
   renderDistance: settings.distance,
   speed: settings.speed,
-  flySpeed: settings.speed * 2,
-  cameraMode: settings.mode,
 });
 
 let username = localStorage.getItem("ac_username");
@@ -437,7 +436,6 @@ function syncSettingsInputs(){
   $("set-fov").value=settings.fov;$("set-fov-out").textContent=settings.fov+"°";
   $("set-distance").value=settings.distance;$("set-distance-out").textContent=settings.distance;
   $("set-speed").value=settings.speed;$("set-speed-out").textContent=settings.speed;
-  $("set-mode").value=settings.mode;
 }
 
 // ---- Pause menu ---------------------------------------------------------------
@@ -460,9 +458,8 @@ $("hud-menu").addEventListener("click",openPause);
     if(dveView)dveView.setSettings(viewSettings());
   });
 });
-$("set-mode").addEventListener("change",()=>{settings.mode=$("set-mode").value;saveSettings();if(dveView)dveView.setSettings(viewSettings());updateFlyHud();});
 $("set-server").addEventListener("change",()=>{settings.server=$("set-server").value;saveSettings();location.reload();}); // fresh API_BASE, WS, session
-$("settings-reset").addEventListener("click",()=>{settings={...DEFAULT_SETTINGS};if(!isLocalPage)settings.server="global";saveSettings();syncSettingsInputs();if(dveView)dveView.setSettings(viewSettings());updateFlyHud();});
+$("settings-reset").addEventListener("click",()=>{settings={...DEFAULT_SETTINGS};if(!isLocalPage)settings.server="global";saveSettings();syncSettingsInputs();if(dveView)dveView.setSettings(viewSettings());});
 
 function openInventoryDialog(){
   refreshInventory();
@@ -470,7 +467,6 @@ function openInventoryDialog(){
 }
 $("hud-inventory").addEventListener("click",openInventoryDialog);
 $("hud-studio").addEventListener("click",()=>$("studio-dialog").showModal());
-$("hud-fly").addEventListener("click",toggleFlyMode);
 document.querySelectorAll("dialog").forEach(d=>d.addEventListener("close",()=>{if(dveView)dveView.releaseInput();}));
 
 // ---- Shared world: server-authoritative 3D edit state --------------------------
@@ -526,7 +522,7 @@ async function worldAction(button,x,y,z){
 // ---- Fullscreen 3D game (Divine Voxel Engine, ./dve/dist/) -------------------
 // Server-authoritative: every click goes through /api/world/place|break and
 // paints via the WS echo (noteEdit → applyEdit). The DVE module handles look
-// (pointer lock or drag), WASD walk/fly, and picking.
+// (pointer lock or drag), WASD walking with gravity + Space jump, and picking.
 async function initGameView(){
   if(!window.WebGLRenderingContext)throw new Error("WebGL unavailable in this browser");
   dveView=await dveMod.createDVEView($("game-canvas"),currentBlocks,API_BASE,{
@@ -539,18 +535,8 @@ function failGame(err){
   $("game-loading-text").textContent=`3D engine unavailable: ${err&&err.message||err}`;
 }
 
-function updateFlyHud(){
-  const flying=settings.mode==="fly";
-  $("hud-fly").innerHTML=`Fly: ${flying?"on":"off"} <small>F</small>`;
-  $("hud-mode").textContent=flying?"fly":"walk";
-  if($("set-mode").value!==settings.mode)$("set-mode").value=settings.mode;
-}
-function toggleFlyMode(){
-  settings.mode=settings.mode==="fly"?"walk":"fly";
-  saveSettings();
-  if(dveView)dveView.setSettings(viewSettings());
-  updateFlyHud();
-}
+// Look/move/jump physics live in the DVE module (pointer lock or drag, WASD,
+// gravity + Space). This layer only handles clicks and UI keys.
 
 // Click = action (break/place at the crosshair), press-and-move = look (the
 // DVE module handles look via pointer lock or drag; a click without movement
@@ -587,7 +573,7 @@ setInterval(()=>{
   }
 },500);
 
-// Game keyboard: hotbar 1–9, dialogs, fly toggle. (Look/move keys live in the
+// Game keyboard: hotbar 1–9, dialogs. (Look/move/jump keys live in the
 // DVE module's own listeners; this layer only opens UI.)
 document.addEventListener("keydown",e=>{
   if(["INPUT","SELECT","TEXTAREA"].includes(document.activeElement.tagName))return;
@@ -600,7 +586,6 @@ document.addEventListener("keydown",e=>{
     else openPause();
     return;
   }
-  if(e.key==="f"||e.key==="F"){toggleFlyMode();return;}
   if(e.key==="e"||e.key==="E"||e.key==="i"||e.key==="I"){e.preventDefault();openInventoryDialog();return;}
   if(e.key==="b"||e.key==="B"){e.preventDefault();$("studio-dialog").showModal();return;}
   if(/^Digit[1-9]$/.test(e.code)){
@@ -614,7 +599,6 @@ document.addEventListener("keydown",e=>{
 // ---- Boot: straight into the game ---------------------------------------------
 async function boot(){
   updateServerChip();
-  updateFlyHud();
   updateAccountChip();
   restoreSession();
   connectLive();

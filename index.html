@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#10151d">
+  <meta name="theme-color" content="#f3ead8">
   <title>All Contribute</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
@@ -16,19 +16,17 @@
     <div class="hud-top">
       <span id="hud-server" class="hud-chip">server: —</span>
       <span id="hud-coords" class="hud-chip">x 0 · y 0 · z 0</span>
-      <span id="hud-mode" class="hud-chip">walk</span>
       <span id="hud-held" class="hud-chip">no item</span>
     </div>
     <div id="hotbar"></div>
     <div class="hud-buttons">
       <button id="hud-inventory" class="button button-quiet" type="button">Inventory <small>E</small></button>
       <button id="hud-studio" class="button button-quiet" type="button">Block manager <small>B</small></button>
-      <button id="hud-fly" class="button button-quiet" type="button">Fly: off <small>F</small></button>
       <button id="hud-menu" class="button button-quiet" type="button">Menu <small>Esc</small></button>
     </div>
     <div id="game-loading">
       <span id="game-loading-text">starting 3D engine…</span>
-      <p class="hero-keys">In game: <b>WASD</b> move · mouse look · <b>Space/Shift</b> fly · <b>F</b> fly/walk · <b>1–9</b> hotbar · left-click break · right-click place · <b>E</b> inventory · <b>B</b> block manager · <b>Esc</b> menu</p>
+      <p class="hero-keys">In game: <b>WASD</b> move · mouse look · <b>Space</b> jump · <b>1–9</b> hotbar · left-click break · right-click place · <b>E</b> inventory · <b>B</b> block manager · <b>Esc</b> menu</p>
     </div>
   </div>
 
@@ -73,7 +71,6 @@
       <label>Field of view<input id="set-fov" type="range" min="60" max="110" step="1" value="80"><output id="set-fov-out">80°</output></label>
       <label>Render distance<input id="set-distance" type="range" min="120" max="2000" step="20" value="900"><output id="set-distance-out">900</output></label>
       <label>Movement speed<input id="set-speed" type="range" min="3" max="20" step="1" value="8"><output id="set-speed-out">8</output></label>
-      <label>Camera mode<select id="set-mode"><option value="walk">Walk on terrain</option><option value="fly">Free fly</option></select></label>
     </div>
     <p class="micro-note">Settings are stored in this browser and apply to the 3D game immediately.</p>
     <button id="settings-reset" class="text-button" type="button">Reset to defaults</button>
