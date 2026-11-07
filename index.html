@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f3ead8">
   <title>All Contribute</title>
   <link rel="icon" type="image/svg+xml" href="./favicon.svg?v=1">
-  <link rel="stylesheet" href="./styles.css?v=6">
+  <link rel="stylesheet" href="./styles.css?v=7">
 </head>
 <body>
   <!-- The site IS the game: opening the page boots straight into the shared
@@ -24,14 +24,16 @@
     <div id="damage-flash" aria-hidden="true"></div>
     <div class="hud-buttons">
       <button id="hud-grab" class="button button-quiet" type="button" hidden>Grab cursor</button>
-      <button id="hud-character" class="button button-quiet" type="button">Character <small>E</small></button>
+      <button id="hud-character" class="button button-quiet" type="button">Character <small>C</small></button>
       <button id="hud-inventory" class="button button-quiet" type="button">Inventory <small>I</small></button>
       <button id="hud-studio" class="button button-quiet" type="button">Studio <small>B</small></button>
       <button id="hud-menu" class="button button-quiet" type="button">Menu <small>Esc</small></button>
     </div>
     <div id="game-loading">
       <span id="game-loading-text">starting 3D engine…</span>
-      <p class="hero-keys">In game: <b>WASD</b> move · <b>Shift</b> sprint · mouse look · <b>Space</b> jump · <b>1–9</b> hotbar · left-click break/attack · right-click place · <b>E</b> character · <b>I</b> inventory · <b>B</b> studio · <b>Esc</b> menu</p>
+      <!-- Filled from the same KEYS_HELP string the Instructions menu shows;
+           stays up for JOIN_HELP_MS whether the world loaded or not. -->
+      <p class="hero-keys" id="join-help"></p>
     </div>
     <div id="death-screen" hidden>
       <h2>You died</h2>
@@ -49,6 +51,7 @@
     <p class="modal-sub">One shared, server-authoritative voxel world. Build it together.</p>
     <div class="pause-menu">
       <button id="mm-join" class="button button-primary full" type="button">Join global server</button>
+      <button id="mm-instructions" class="button button-outline full" type="button">Instructions</button>
       <button id="mm-settings" class="button button-outline full" type="button">Settings</button>
     </div>
     <p class="micro-note"><span id="mm-server-chip">Server: global</span> · <span id="mm-account-chip">not signed in</span></p>
@@ -60,6 +63,7 @@
     <p class="modal-sub"><span id="pause-server-chip">Server: global</span> · <span id="pause-account-chip">not signed in</span></p>
     <div class="pause-menu">
       <button id="pause-resume" class="button button-primary full" type="button">Resume <span>▶</span></button>
+      <button id="pause-instructions" class="button button-outline full" type="button">Instructions</button>
       <button id="pause-inventory" class="button button-outline full" type="button">Inventory</button>
       <button id="pause-studio" class="button button-outline full" type="button">Studio</button>
       <button id="pause-settings" class="button button-outline full" type="button">Settings</button>
@@ -67,6 +71,15 @@
       <button id="pause-account" class="button button-outline full" type="button">Account</button>
     </div>
     <p class="micro-note">The world is shared and server-authoritative: your edits land for every player. Log in (or create an account) to keep your inventory and creations.</p>
+  </dialog>
+
+  <!-- Instructions: the very same text the join overlay shows for its ten
+       seconds, reachable from both the main menu and the pause menu. -->
+  <dialog id="instructions-dialog" class="modal">
+    <form method="dialog" class="modal-close"><button aria-label="Close">×</button></form>
+    <div class="modal-mark">A</div><span class="eyebrow">HOW TO PLAY</span><h2>Instructions</h2>
+    <p class="keys-list" id="instructions-body"></p>
+    <p class="micro-note">The same brief you get for the first ten seconds after joining a world.</p>
   </dialog>
 
   <dialog id="auth-dialog" class="modal">
@@ -222,6 +235,6 @@
   </dialog>
 
   <div id="toast" role="status" class="toast"></div>
-  <script src="./app.js?v=10"></script>
+  <script src="./app.js?v=11"></script>
 </body>
 </html>

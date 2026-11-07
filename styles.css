@@ -76,6 +76,9 @@
 /* In-game key hints + pause menu */
 .hero-keys{margin:14px 0 0;color:#f3ead8;font-size:11px;line-height:1.9}
 .hero-keys b{font-family:"DM Mono",monospace;font-weight:500;background:#2e2519cc;border:1px solid #f3ead866;border-radius:5px;padding:1px 5px}
+/* The same brief inside a paper dialog: ink on paper instead of paper on world. */
+.keys-list{margin:14px 0 0;color:var(--ink);font:12px/2 "DM Mono",monospace}
+.keys-list b{font-family:"DM Mono",monospace;font-weight:500;background:var(--paper3);border:1px solid var(--line);border-radius:5px;padding:1px 5px;color:var(--ink)}
 #game-loading{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);font-family:"DM Mono",monospace;font-size:12px;color:#fdf6e8;z-index:62;text-align:center;width:min(680px,90vw);text-shadow:1px 1px 0 #2e2519}
 .pause-modal{width:min(380px,92vw)}
 .pause-menu{display:flex;flex-direction:column;gap:9px;margin:4px 0 0}

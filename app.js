@@ -976,8 +976,35 @@ async function worldAction(button,x,y,z){
 // Server-authoritative: every click goes through /api/world/place|break and
 // paints via the WS echo (noteEdit → applyEdit). The DVE module handles look
 // (pointer lock or drag), WASD walking with gravity + Space jump, and picking.
+
+// One source for the control brief: the join overlay and the Instructions menu
+// (main menu + pause menu) both render this exact string.
+const JOIN_HELP_MS = 10_000;
+const KEYS_HELP = 'In game: <b>WASD</b> move · <b>Shift</b> sprint · mouse look · <b>Space</b> jump · <b>1–9</b> hotbar · left-click break/attack · right-click place · <b>F</b> eat · <b>C</b> character · <b>I</b> inventory · <b>B</b> studio · <b>Esc</b> menu';
+$("join-help").innerHTML = KEYS_HELP;
+$("instructions-body").innerHTML = KEYS_HELP;
+let joinHelpTimer = null;
+// The overlay is two independent things: the engine status line (hidden when
+// the view is ready) and the control brief (hidden after JOIN_HELP_MS). The
+// brief is a timer, not a load gate — a fast build must not trap it, a slow
+// one must not hide it early — so the box itself only goes away when both are
+// done.
+function syncLoadingOverlay() { $("game-loading").hidden = $("game-loading-text").hidden && $("join-help").hidden; }
+function showJoinHelp() {
+  clearTimeout(joinHelpTimer);
+  $("game-loading").hidden = false;
+  $("game-loading-text").hidden = false;
+  $("game-loading-text").textContent = "starting 3D engine…";
+  $("join-help").hidden = false;
+  joinHelpTimer = setTimeout(() => { $("join-help").hidden = true; syncLoadingOverlay(); }, JOIN_HELP_MS);
+}
+function openInstructions() { $("instructions-dialog").showModal(); }
+$("mm-instructions").addEventListener("click", openInstructions);
+$("pause-instructions").addEventListener("click", openInstructions);
+
 async function initGameView(){
   if(!window.WebGLRenderingContext)throw new Error("WebGL unavailable in this browser");
+  showJoinHelp();
   let spawn=null;
   try{
     const r=await api("/api/player/state");
@@ -990,7 +1017,8 @@ async function initGameView(){
     cellAt:(x,y,z)=>cellBlock(x,y,z),
     spawn:spawn||undefined,
   });
-  $("game-loading").hidden=true;
+  $("game-loading-text").hidden=true;
+  syncLoadingOverlay();
   // A player who left while dead comes back dead: the object already ignores
   // their pose frames, so the client shows the death screen and parks the body.
   if(health<=0)applyDeath(null);else hideDeath();
@@ -1013,6 +1041,10 @@ function startStateSaver(){
   },2000);
 }
 function failGame(err){
+  // The engine never became ready, so the status line stays up; the control
+  // brief still retires on its own timer.
+  $("game-loading").hidden=false;
+  $("game-loading-text").hidden=false;
   $("game-loading-text").textContent=`3D engine unavailable: ${err&&err.message||err}`;
 }
 
@@ -1074,7 +1106,7 @@ document.addEventListener("keydown",e=>{
     if($("death-screen").hidden)openPause();
     return;
   }
-  if(e.key==="e"||e.key==="E"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();openCharacterDialog();return;}
+  if(e.key==="c"||e.key==="C"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();openCharacterDialog();return;}
   if(e.key==="i"||e.key==="I"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();openInventoryDialog();return;}
   if(e.key==="b"||e.key==="B"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();$("studio-dialog").showModal();return;}
   if(e.key==="f"||e.key==="F"){e.preventDefault();eatSelected();return;}
