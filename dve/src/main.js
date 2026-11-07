@@ -271,6 +271,10 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
   // The vlox light pipeline does not run here (faces would multiply by empty
   // light data), so a block's registry `light` value is rendered the Babylon
   // way: an emissive cube on the cell, collected into a GlowLayer bloom.
+  // vlox renders every voxel section in Babylon rendering group 1 and Babylon
+  // clears the depth buffer between groups — anything we draw must be in that
+  // group or voxels behind it will paint over it.
+  const VOXEL_GROUP = 1;
   const glowLayer = new GlowLayer("glow", scene, { mainTextureSamples: 2 });
   const glowInfo = new Map(); // voxel id -> { colour, light }
   const glowMeshes = new Map(); // "x,y,z" -> Mesh
@@ -291,6 +295,7 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     if (!m) {
       m = MeshBuilder.CreateBox("glow", { size: 1.001 }, scene);
       m.position.set(x + 0.5, y + 0.5, z + 0.5);
+      m.renderingGroupId = VOXEL_GROUP;
       const mat = new StandardMaterial("glow-mat", scene);
       const k = 0.6 + 0.4 * (info.light / 15);
       mat.emissiveColor = info.colour.scale(k);
@@ -375,32 +380,39 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
   };
   // ---- Remote players --------------------------------------------------------
   // Presence fan-out (WS "pose" frames from the WorldLive object) draws a
-  // simple blocky body + name card for every other player. Positions lerp
-  // toward the last pose so 5 Hz updates look smooth.
+  // blocky body + name card for every other player. Positions lerp toward the
+  // last pose so 5 Hz updates look smooth. The body colours come from the
+  // player's saved appearance.
+  const hexColour = v => (typeof v === "string" && /^#[0-9a-fA-F]{6}$/.test(v) ? v : null);
+  const lookOf = a => ({
+    body_colour: hexColour(a && a.body_colour) || "#3b6ea5",
+    head_colour: hexColour(a && a.head_colour) || "#d9a06b",
+    accent_colour: hexColour(a && a.accent_colour) || "#2f8f4f",
+  });
   const remotes = new Map();
-  const ensureRemote = (name) => {
+  const ensureRemote = (name, appearance) => {
     let r = remotes.get(name);
     if (r) return r;
-    let hue = 7;
-    for (const ch of String(name)) hue = (hue * 31 + ch.charCodeAt(0)) % 360;
-    const col = Color3.FromHSV(hue, 0.55, 0.85);
     const root = new Mesh("player", scene);
-    const part = (w, h, d, y, glow) => {
+    root.renderingGroupId = VOXEL_GROUP;
+    const parts = [];
+    const part = (w, h, d, y, key) => {
       const m = MeshBuilder.CreateBox("part", { width: w, height: h, depth: d }, scene);
       m.position.y = y;
       m.parent = root;
+      m.renderingGroupId = VOXEL_GROUP;
       const mat = new StandardMaterial("part-mat", scene);
-      mat.diffuseColor = col;
-      mat.emissiveColor = col.scale(glow);
       m.material = mat;
+      parts.push({ mat, key });
       return m;
     };
-    part(0.5, 0.9, 0.3, 0.45, 0.25);   // legs
-    part(0.6, 0.55, 0.35, 1.22, 0.4);  // body
-    part(0.4, 0.35, 0.35, 1.67, 0.5);  // head
+    part(0.5, 0.9, 0.3, 0.45, "accent_colour");   // legs
+    part(0.6, 0.55, 0.35, 1.22, "body_colour");   // body
+    part(0.4, 0.35, 0.35, 1.67, "head_colour");   // head
     const label = MeshBuilder.CreatePlane("name", { width: Math.min(2.2, 0.25 + String(name).length * 0.13), height: 0.34 }, scene);
     label.position.y = 2.15;
     label.parent = root;
+    label.renderingGroupId = VOXEL_GROUP;
     label.billboardMode = Mesh.BILLBOARDMODE_ALL;
     const tex = new DynamicTexture("name-tex", { width: 256, height: 64 }, scene, true);
     const ctx = tex.getContext();
@@ -418,9 +430,21 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     lmat.opacityTexture = tex;
     lmat.disableLighting = true;
     label.material = lmat;
-    r = { root, rx: NaN, ry: 0, target: null, last: 0 };
+    r = { root, parts, look: null, rx: NaN, ry: 0, target: null, last: 0 };
     remotes.set(name, r);
+    applyLook(r, appearance);
     return r;
+  };
+  const applyLook = (r, appearance) => {
+    const look = JSON.stringify(lookOf(appearance));
+    if (r.look === look) return;
+    r.look = look;
+    const parsed = JSON.parse(look);
+    for (const { mat, key } of r.parts) {
+      const col = Color3.FromHexString(parsed[key]);
+      mat.diffuseColor = col;
+      mat.emissiveColor = col.scale(0.3);
+    }
   };
   const advanceRemotes = () => {
     const now = Date.now();
@@ -466,7 +490,7 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
   window.__dve = { engine, scene, camera, DVER, buildSpace, counts: __dveCounts, errors: __dveErrors, genCell: () => genCell, frame,
     aim: (y, p) => { yaw = y; pitch = clamp(p, -1.52, 1.52); camera.rotation.y = yaw; camera.rotation.x = pitch; } };
 
-  return {
+  const view = {
     /** Apply one server-authoritative edit to a single voxel. */
     async applyEdit(x, y, z, blockId) {
       if (x < SLAB.X0 || x >= SLAB.X1 || y < SLAB.Y0 || y >= SLAB.Y1 || z < SLAB.Z0 || z >= SLAB.Z1) return;
@@ -516,8 +540,9 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     /** Update live settings (sensitivity/fov/render distance/speed). */
     setSettings(next) { applySettings(next); },
     /** Place or update a remote player's avatar from a presence pose frame. */
-    setRemote(name, x, y, z, yaw) {
-      const r = ensureRemote(name);
+    setRemote(name, x, y, z, yaw, appearance) {
+      const r = ensureRemote(name, appearance);
+      applyLook(r, appearance);
       r.target = { x, y, z, yaw };
       r.last = Date.now();
     },
@@ -559,4 +584,6 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
       return { x: p.x, y: p.y, z: p.z, yaw, pitch, surfaceY: surfaceEye(p.x, p.z) };
     },
   };
+  window.__dve.view = view;
+  return view;
 }

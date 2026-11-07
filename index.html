@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f3ead8">
   <title>All Contribute</title>
-  <link rel="stylesheet" href="./styles.css?v=2">
+  <link rel="stylesheet" href="./styles.css?v=3">
 </head>
 <body>
   <!-- The site IS the game: opening the page boots straight into the shared
@@ -21,7 +21,8 @@
     <div id="hotbar"></div>
     <div class="hud-buttons">
       <button id="hud-grab" class="button button-quiet" type="button" hidden>Grab cursor</button>
-      <button id="hud-inventory" class="button button-quiet" type="button">Inventory <small>E</small></button>
+      <button id="hud-character" class="button button-quiet" type="button">Character <small>E</small></button>
+      <button id="hud-inventory" class="button button-quiet" type="button">Inventory <small>I</small></button>
       <button id="hud-studio" class="button button-quiet" type="button">Block manager <small>B</small></button>
       <button id="hud-menu" class="button button-quiet" type="button">Menu <small>Esc</small></button>
     </div>
@@ -95,11 +96,11 @@
     <div class="game-tools-grid modal-grid">
       <article class="panel inventory-panel">
         <div class="panel-title"><div class="icon-box violet">▤</div><div><h3>Inventory</h3><p>Your current item stacks</p></div><span id="inventory-total" class="panel-number">0 items</span></div>
-        <form id="add-item-form" class="add-item-form">
+        <form id="add-item-form" class="add-item-form" hidden>
           <label>Block / item ID<input id="add-item-id" maxlength="128" placeholder="e.g. builtin:stone" autocomplete="off" spellcheck="false" required></label>
           <div class="form-row add-item-row"><label>Quantity<input id="add-item-quantity" type="number" min="1" max="999" value="16" required></label><button class="button button-primary add-item-button" type="submit">＋ Add test items</button></div>
         </form>
-        <p class="micro-note">Testing tool: grants stacks to your account (server-side). Placing spends, breaking returns; IDs not in the registry cannot be placed.</p>
+        <p id="add-item-note" class="micro-note" hidden>Testing tool: grants stacks to your account (server-side). Placing spends, breaking returns; IDs not in the registry cannot be placed.</p>
         <div class="inventory-list-heading"><span>ITEM</span><span>QUANTITY</span></div>
         <div id="inventory-list" class="inventory-list"><div class="empty">Your inventory is empty. Break blocks in the world or add items above.</div></div>
         <button id="clear-inventory-button" class="text-button" type="button">Clear inventory</button>
@@ -109,6 +110,24 @@
         <div id="crafting-list" class="crafting-list"><div class="empty">Loading recipes…</div></div>
         <p class="micro-note">Each occurrence of an ingredient ID in a recipe consumes one item. Repeating an ID represents a larger ingredient quantity.</p>
       </article>
+    </div>
+  </dialog>
+
+  <dialog id="character-dialog" class="modal">
+    <form method="dialog" class="modal-close"><button aria-label="Close">×</button></form>
+    <div class="modal-mark">☺</div><span class="eyebrow">HOW OTHERS SEE YOU</span><h2>Character</h2>
+    <p class="modal-sub">Signed in as <strong id="character-user">—</strong>. Colours are saved to your account and shown on your avatar in the world.</p>
+    <div class="character-grid">
+      <div id="character-preview" class="character-preview" aria-hidden="true">
+        <span class="character-head"></span><span class="character-body"></span><span class="character-legs"></span>
+      </div>
+      <div class="character-fields">
+        <label>Head colour<input id="char-head" type="color" value="#d9a06b" class="colour-input"></label>
+        <label>Body colour<input id="char-body" type="color" value="#3b6ea5" class="colour-input"></label>
+        <label>Legs colour<input id="char-legs" type="color" value="#2f8f4f" class="colour-input"></label>
+        <button class="button button-primary full" id="character-save" type="button">Save character</button>
+        <p class="micro-note">Other players see the change as soon as it is saved.</p>
+      </div>
     </div>
   </dialog>
 
@@ -139,12 +158,13 @@
         <p class="micro-note">No arbitrary code is executed. This prototype accepts safe block properties only.</p>
       </article>
       <article class="panel">
-        <div class="panel-title"><div class="icon-box amber">⚒</div><div><h3>Recipe forge</h3><p>Make something new</p></div><span class="panel-number">02</span></div>
+        <div class="panel-title"><div class="icon-box amber">⚒</div><div><h3 id="recipe-form-title">Recipe forge</h3><p id="recipe-form-sub">Make something new</p></div><span class="panel-number">02</span></div>
         <form id="recipe-form">
           <label>Recipe name<input id="recipe-name" maxlength="60" placeholder="e.g. Starstone brick" required></label>
           <label>Ingredients <span class="optional">comma-separated item IDs; repeat IDs for extra quantity</span><input id="recipe-ingredients" placeholder="builtin:stone, builtin:wood" required></label>
           <div class="form-row"><label>Result block / item ID<input id="recipe-result" placeholder="player:yourname:starstone" required></label><label>Quantity<input id="recipe-quantity" type="number" min="1" max="999" value="1"></label></div>
-          <button class="button button-primary full" type="submit">Publish recipe <span>＋</span></button>
+          <div class="edit-note" id="recipe-edit-note" hidden>Editing <code id="recipe-edit-id"></code> <button type="button" id="recipe-edit-cancel" class="text-button">Cancel edit</button></div>
+          <button class="button button-primary full" id="recipe-submit" type="submit">Publish recipe <span>＋</span></button>
         </form>
         <p class="micro-note">Use full IDs, such as <code>builtin:stone</code> or <code>player:username:block_id</code>. Recipes become available in the crafting table.</p>
       </article>
@@ -153,9 +173,13 @@
       <div class="panel-title"><div class="icon-box violet">⌗</div><div><h3>My blocks</h3><p>Edit or remove blocks you created</p></div></div>
       <div id="my-blocks-list" class="registry-list"><div class="empty">You have not published any blocks yet.</div></div>
     </article>
+    <article class="panel my-blocks-panel">
+      <div class="panel-title"><div class="icon-box amber">⚒</div><div><h3>My recipes</h3><p>Edit or remove recipes you created</p></div></div>
+      <div id="my-recipes-list" class="registry-list"><div class="empty">You have not published any recipes yet.</div></div>
+    </article>
   </dialog>
 
   <div id="toast" role="status" class="toast"></div>
-  <script src="./app.js?v=2"></script>
+  <script src="./app.js?v=3"></script>
 </body>
 </html>

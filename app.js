@@ -33,6 +33,9 @@ const viewSettings = () => ({
 });
 
 let username = localStorage.getItem("ac_username");
+// Saved character colours (server-side, mirrored for presence frames).
+const DEFAULT_APPEARANCE = { body_colour: "#3b6ea5", head_colour: "#d9a06b", accent_colour: "#2f8f4f" };
+let appearance = { ...DEFAULT_APPEARANCE };
 let authenticated = false;
 // Remove the old JavaScript-readable bearer token. Authentication now uses an HttpOnly cookie.
 localStorage.removeItem("ac_token");
@@ -131,6 +134,13 @@ function updateAccountChip(){
   $("mm-account-chip").textContent = label;
   $("pause-account").textContent = authenticated && username ? "Account" : "Log in / Register";
 }
+// "Add test items" is an admin-only tool; the form stays hidden for everyone
+// else (the handler also refuses, so a stale DOM cannot be used).
+function isAdmin(){return authenticated&&String(username||"").toLowerCase()==="admin";}
+function renderAdminTools(){
+  $("add-item-form").hidden=!isAdmin();
+  $("add-item-note").hidden=!isAdmin();
+}
 function setAuthenticatedUser(name){
   username=name;
   authenticated=true;
@@ -139,6 +149,8 @@ function setAuthenticatedUser(name){
   renderInventory();
   renderCrafting();
   renderMyBlocks();
+  renderMyRecipes();
+  renderAdminTools();
   migrateLegacyInventory().then(refreshInventory);
 }
 function clearAuthenticatedUser(){
@@ -151,6 +163,8 @@ function clearAuthenticatedUser(){
   renderInventory();
   renderCrafting();
   renderMyBlocks();
+  renderMyRecipes();
+  renderAdminTools();
 }
 function openAuth(mode="register"){
   authMode=mode; $("auth-title").textContent=mode==="register"?"Join the world":"Welcome back";
@@ -239,11 +253,11 @@ async function refreshRegistry(){
     setConnection(true);
     currentBlocks=Array.isArray(blocks.blocks)?blocks.blocks:[];
     currentRecipes=Array.isArray(recipes.recipes)?recipes.recipes:[];
-    renderInventory();renderCrafting();renderMyBlocks();
+    renderInventory();renderCrafting();renderMyBlocks();renderMyRecipes();
   }catch(err){
     setConnection(false);currentBlocks=[];currentRecipes=[];
     renderInventory();$("crafting-list").innerHTML='<div class="empty">Recipes are unavailable until the API reconnects.</div>';
-    renderMyBlocks();
+    renderMyBlocks();renderMyRecipes();
   }
 }
 function escapeHtml(v){return String(v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
@@ -253,6 +267,7 @@ function escapeAttr(v){return escapeHtml(v).replace(/;/g,"");}
 $("add-item-form").addEventListener("submit",async e=>{
   e.preventDefault();
   if(!authenticated){openAuth("login");toast("Log in to manage your inventory.");return;}
+  if(!isAdmin()){toast("Only the admin account can add test items.",true);return;}
   const id=$("add-item-id").value.trim().toLowerCase();
   const quantity=Number($("add-item-quantity").value);
   if(!/^[a-z0-9_:-]{1,48}$/.test(id)){toast("Use 1–48 letters, numbers, underscores, colons or hyphens for the item ID.",true);return;}
@@ -432,11 +447,74 @@ $("my-blocks-list").addEventListener("click",async e=>{
   }catch(err){pendingDelete.delete(id);renderMyBlocks();toast(err.message,true);}
 });
 
+// ---- Recipes: publish, edit (own recipes), delete (own recipes) --------------
+let editingRecipeId=null;
+const pendingRecipeDelete=new Set();
+function recipeFormTitle(){
+  $("recipe-form-title").textContent=editingRecipeId?"Edit recipe":"Recipe forge";
+  $("recipe-form-sub").textContent=editingRecipeId?"Changes apply to the live registry.":"Make something new";
+  $("recipe-submit").innerHTML=editingRecipeId?"Save changes":'Publish recipe <span>＋</span>';
+}
+function enterRecipeEdit(recipe){
+  editingRecipeId=recipe.id;
+  pendingRecipeDelete.clear();
+  $("recipe-name").value=recipe.name;
+  $("recipe-ingredients").value=(recipe.ingredients||[]).join(", ");
+  $("recipe-result").value=recipe.result_id;
+  $("recipe-quantity").value=Number(recipe.quantity)||1;
+  $("recipe-edit-note").hidden=false;$("recipe-edit-id").textContent=recipe.name;
+  recipeFormTitle();
+  $("recipe-form").scrollIntoView({behavior:"smooth",block:"center"});
+}
+function exitRecipeEdit(){
+  editingRecipeId=null;
+  $("recipe-edit-note").hidden=true;
+  recipeFormTitle();
+  $("recipe-form").reset();$("recipe-quantity").value=1;
+}
+$("recipe-edit-cancel").addEventListener("click",exitRecipeEdit);
 $("recipe-form").addEventListener("submit",async e=>{
   e.preventDefault();if(!authenticated){openAuth("login");toast("Log in to publish a recipe.");return;}
   const body={name:$("recipe-name").value,ingredients:$("recipe-ingredients").value.split(",").map(x=>x.trim().toLowerCase()).filter(Boolean),result_id:$("recipe-result").value.trim().toLowerCase(),quantity:Number($("recipe-quantity").value)};
-  try{await api("/api/recipes",{method:"POST",body:JSON.stringify(body)});toast("Recipe published.");e.target.reset();$("recipe-quantity").value=1;await refreshRegistry();}
+  try{
+    if(editingRecipeId){
+      await api(`/api/recipes/${encodeURIComponent(editingRecipeId)}`,{method:"PUT",body:JSON.stringify(body)});
+      toast(`Recipe “${body.name}” updated.`);
+      exitRecipeEdit();
+    }else{
+      await api("/api/recipes",{method:"POST",body:JSON.stringify(body)});
+      toast("Recipe published.");
+      e.target.reset();$("recipe-quantity").value=1;
+    }
+    await refreshRegistry();
+  }
   catch(err){toast(err.message,true);}
+});
+function renderMyRecipes(){
+  const list=$("my-recipes-list");
+  if(!authenticated){list.innerHTML='<div class="empty">Log in to manage your own recipes.</div>';return;}
+  const mine=currentRecipes.filter(r=>String(r.creator||"").toLowerCase()===(username||"").toLowerCase());
+  if(!mine.length){list.innerHTML='<div class="empty">You have not published any recipes yet.</div>';return;}
+  list.innerHTML=mine.map(r=>{
+    const pending=pendingRecipeDelete.has(r.id);
+    const ingredients=(r.ingredients||[]).join(", ");
+    return `<div class="registry-item"><span class="swatch recipe-swatch">⚒</span><div class="item-info"><strong>${escapeHtml(r.name)}</strong><small>${escapeHtml(ingredients)} → ${Number(r.quantity)||1} × ${escapeHtml(r.result_id)}</small></div><div class="my-block-actions"><button class="button button-outline" type="button" data-mr-edit="${escapeAttr(r.id)}">Edit</button><button class="button ${pending?"button-danger":"button-outline"}" type="button" data-mr-del="${escapeAttr(r.id)}">${pending?"Really delete?":"Delete"}</button></div></div>`;
+  }).join("");
+}
+$("my-recipes-list").addEventListener("click",async e=>{
+  const edit=e.target.closest("[data-mr-edit]");
+  if(edit){const recipe=currentRecipes.find(r=>r.id===edit.dataset.mrEdit);if(recipe)enterRecipeEdit(recipe);return;}
+  const del=e.target.closest("[data-mr-del]");
+  if(!del)return;
+  const id=del.dataset.mrDel;
+  if(!pendingRecipeDelete.has(id)){pendingRecipeDelete.add(id);renderMyRecipes();return;} // two-step, no native confirm
+  try{
+    await api(`/api/recipes/${encodeURIComponent(id)}`,{method:"DELETE"});
+    pendingRecipeDelete.delete(id);
+    if(editingRecipeId===id)exitRecipeEdit();
+    await refreshRegistry();
+    toast("Recipe removed.");
+  }catch(err){pendingRecipeDelete.delete(id);renderMyRecipes();toast(err.message,true);}
 });
 
 // ---- Settings dialog -----------------------------------------------------------
@@ -488,6 +566,36 @@ function openInventoryDialog(){
   refreshInventory();
   $("inventory-dialog").showModal();
 }
+// ---- Character menu ----------------------------------------------------------
+// Colours are stored per account (POST /api/player/appearance) and ride every
+// presence frame, so other players' avatars update live.
+function renderCharacterPreview(){
+  $("character-user").textContent=username||"not signed in";
+  $("char-head").value=appearance.head_colour;
+  $("char-body").value=appearance.body_colour;
+  $("char-legs").value=appearance.accent_colour;
+  const p=$("character-preview");
+  p.style.setProperty("--head",appearance.head_colour);
+  p.style.setProperty("--body",appearance.body_colour);
+  p.style.setProperty("--legs",appearance.accent_colour);
+}
+function readCharacterInputs(){
+  appearance={head_colour:$("char-head").value,body_colour:$("char-body").value,accent_colour:$("char-legs").value};
+}
+["char-head","char-body","char-legs"].forEach(id=>$(id).addEventListener("input",()=>{readCharacterInputs();renderCharacterPreview();}));
+$("character-save").addEventListener("click",async()=>{
+  if(!authenticated){openAuth("login");toast("Log in to save your character.");return;}
+  readCharacterInputs();
+  try{
+    const r=await api("/api/player/appearance",{method:"POST",body:JSON.stringify(appearance)});
+    if(r&&r.body_colour)appearance={...DEFAULT_APPEARANCE,...r};
+    renderCharacterPreview();
+    sendPresence(true); // others see the new colours immediately
+    toast("Character saved.");
+  }catch(err){toast(err.message,true);}
+});
+function openCharacterDialog(){renderCharacterPreview();$("character-dialog").showModal();}
+$("hud-character").addEventListener("click",openCharacterDialog);
 $("hud-inventory").addEventListener("click",openInventoryDialog);
 $("hud-studio").addEventListener("click",()=>$("studio-dialog").showModal());
 document.querySelectorAll("dialog").forEach(d=>d.addEventListener("close",()=>{
@@ -500,7 +608,13 @@ document.querySelectorAll("dialog").forEach(d=>d.addEventListener("close",()=>{
 // free, so the player can hand the mouse back to the game after any release.
 const grabBtn=$("hud-grab");
 function syncGrabBtn(){grabBtn.hidden=!!document.pointerLockElement||!dveView||$("game").hidden;}
-document.addEventListener("pointerlockchange",syncGrabBtn);
+document.addEventListener("pointerlockchange",()=>{
+  syncGrabBtn();
+  // Escape while playing: Chrome exits pointer lock and swallows the key, so
+  // this is where "Esc opens the pause menu" has to be handled. Only when the
+  // release was not caused by opening a menu or leaving the game screen.
+  if(!document.pointerLockElement&&dveView&&!$("game").hidden&&!document.querySelector("dialog[open]"))openPause();
+});
 setInterval(syncGrabBtn,500);
 grabBtn.addEventListener("click",()=>{if(dveView)dveView.grabPointer();});
 
@@ -534,8 +648,8 @@ function connectLive(){
   ws.onopen=()=>{wsRetry=0;setConnection(true);sendPresence(true);};
   ws.onmessage=event=>{try{const m=JSON.parse(event.data);
     if(m.type==="edit")noteEdit(m.x,m.y,m.z,m.block_id);
-    else if(m.type==="roster")for(const p of m.players||[])if(dveView&&p.name!==username)dveView.setRemote(p.name,p.x,p.y,p.z,p.yaw);
-    else if(m.type==="pose"&&dveView&&m.name!==username)dveView.setRemote(m.name,m.x,m.y,m.z,m.yaw);
+    else if(m.type==="roster")for(const p of m.players||[])if(dveView&&p.name!==username)dveView.setRemote(p.name,p.x,p.y,p.z,p.yaw,p.appearance);
+    else if(m.type==="pose"&&dveView&&m.name!==username)dveView.setRemote(m.name,m.x,m.y,m.z,m.yaw,m.appearance);
     else if(m.type==="leave"&&dveView)dveView.removeRemote(m.name);
   }catch{/* ignore non-JSON frames */}};
   ws.onclose=()=>{setConnection(false);setTimeout(connectLive,Math.min(15000,500*2**wsRetry++));};
@@ -549,7 +663,7 @@ function sendPresence(force){
   const p=dveView.pose;
   if(!force&&Date.now()-presenceAt<250)return;
   presenceAt=Date.now();
-  try{ws.send(JSON.stringify({type:"pose",name:username||"someone",x:p.x,y:p.y,z:p.z,yaw:p.yaw}));}catch{/* racing a close */}
+  try{ws.send(JSON.stringify({type:"pose",name:username||"someone",x:p.x,y:p.y,z:p.z,yaw:p.yaw,appearance}));}catch{/* racing a close */}
 }
 setInterval(sendPresence,250);
 // While the socket is down, polling (since=headSeq) fills the gap.
@@ -577,7 +691,11 @@ async function worldAction(button,x,y,z){
 async function initGameView(){
   if(!window.WebGLRenderingContext)throw new Error("WebGL unavailable in this browser");
   let spawn=null;
-  try{const r=await api("/api/player/state");spawn=r.state;}catch{/* default spawn on surface */}
+  try{
+    const r=await api("/api/player/state");
+    spawn=r.state;
+    if(r.appearance)appearance={...DEFAULT_APPEARANCE,...r.appearance};
+  }catch{/* default spawn on surface */}
   dveView=await dveMod.createDVEView($("game-canvas"),currentBlocks,API_BASE,{
     settings:viewSettings(),
     cellAt:(x,y,z)=>cellBlock(x,y,z),
@@ -653,11 +771,14 @@ document.addEventListener("keydown",e=>{
     return;
   }
   if(e.key==="Escape"){
-    if(document.pointerLockElement)document.exitPointerLock();
-    else openPause();
+    // While the pointer is locked Chrome consumes Escape itself (it exits the
+    // lock without firing a keydown), and the pointerlockchange handler opens
+    // the pause menu there; this branch covers the unlocked case.
+    openPause();
     return;
   }
-  if(e.key==="e"||e.key==="E"||e.key==="i"||e.key==="I"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();openInventoryDialog();return;}
+  if(e.key==="e"||e.key==="E"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();openCharacterDialog();return;}
+  if(e.key==="i"||e.key==="I"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();openInventoryDialog();return;}
   if(e.key==="b"||e.key==="B"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();$("studio-dialog").showModal();return;}
   if(/^Digit[1-9]$/.test(e.code)){
     const entries=Object.entries(inventory).sort(([a],[b])=>a.localeCompare(b)).slice(0,9);
