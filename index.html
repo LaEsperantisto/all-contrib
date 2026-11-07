@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f3ead8">
   <title>All Contribute</title>
-  <link rel="stylesheet" href="./styles.css?v=3">
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg?v=1">
+  <link rel="stylesheet" href="./styles.css?v=6">
 </head>
 <body>
   <!-- The site IS the game: opening the page boots straight into the shared
@@ -19,16 +20,26 @@
       <span id="hud-held" class="hud-chip">no item</span>
     </div>
     <div id="hotbar"></div>
+    <div id="hud-health" class="hud-health" aria-label="Health"><span class="hud-health-label">♥</span></div>
+    <div id="damage-flash" aria-hidden="true"></div>
     <div class="hud-buttons">
       <button id="hud-grab" class="button button-quiet" type="button" hidden>Grab cursor</button>
       <button id="hud-character" class="button button-quiet" type="button">Character <small>E</small></button>
       <button id="hud-inventory" class="button button-quiet" type="button">Inventory <small>I</small></button>
-      <button id="hud-studio" class="button button-quiet" type="button">Block manager <small>B</small></button>
+      <button id="hud-studio" class="button button-quiet" type="button">Studio <small>B</small></button>
       <button id="hud-menu" class="button button-quiet" type="button">Menu <small>Esc</small></button>
     </div>
     <div id="game-loading">
       <span id="game-loading-text">starting 3D engine…</span>
-      <p class="hero-keys">In game: <b>WASD</b> move · <b>Shift</b> sprint · mouse look · <b>Space</b> jump · <b>1–9</b> hotbar · left-click break · right-click place · <b>E</b> inventory · <b>B</b> block manager · <b>Esc</b> menu</p>
+      <p class="hero-keys">In game: <b>WASD</b> move · <b>Shift</b> sprint · mouse look · <b>Space</b> jump · <b>1–9</b> hotbar · left-click break/attack · right-click place · <b>E</b> character · <b>I</b> inventory · <b>B</b> studio · <b>Esc</b> menu</p>
+    </div>
+    <div id="death-screen" hidden>
+      <h2>You died</h2>
+      <p id="death-cause">The world got the better of you.</p>
+      <div class="pause-menu">
+        <button id="death-respawn" class="button button-primary full" type="button">Respawn</button>
+        <button id="death-menu" class="button button-outline full" type="button">Main menu</button>
+      </div>
     </div>
   </div>
 
@@ -50,7 +61,7 @@
     <div class="pause-menu">
       <button id="pause-resume" class="button button-primary full" type="button">Resume <span>▶</span></button>
       <button id="pause-inventory" class="button button-outline full" type="button">Inventory</button>
-      <button id="pause-studio" class="button button-outline full" type="button">Block manager</button>
+      <button id="pause-studio" class="button button-outline full" type="button">Studio</button>
       <button id="pause-settings" class="button button-outline full" type="button">Settings</button>
       <button id="pause-mainmenu" class="button button-outline full" type="button">Main menu</button>
       <button id="pause-account" class="button button-outline full" type="button">Account</button>
@@ -125,6 +136,7 @@
         <label>Head colour<input id="char-head" type="color" value="#d9a06b" class="colour-input"></label>
         <label>Body colour<input id="char-body" type="color" value="#3b6ea5" class="colour-input"></label>
         <label>Legs colour<input id="char-legs" type="color" value="#2f8f4f" class="colour-input"></label>
+        <label>Eye colour<input id="char-eyes" type="color" value="#1d2430" class="colour-input"></label>
         <button class="button button-primary full" id="character-save" type="button">Save character</button>
         <p class="micro-note">Other players see the change as soon as it is saved.</p>
       </div>
@@ -158,7 +170,33 @@
         <p class="micro-note">No arbitrary code is executed. This prototype accepts safe block properties only.</p>
       </article>
       <article class="panel">
-        <div class="panel-title"><div class="icon-box amber">⚒</div><div><h3 id="recipe-form-title">Recipe forge</h3><p id="recipe-form-sub">Make something new</p></div><span class="panel-number">02</span></div>
+        <div class="panel-title"><div class="icon-box amber">⛏</div><div><h3 id="item-form-title">Item forge</h3><p id="item-form-sub">Program an item: what it does when used</p></div><span class="panel-number">02</span></div>
+        <form id="item-form">
+          <label>Display name<input id="item-name" maxlength="40" placeholder="e.g. Starstone brick" required></label>
+          <div class="form-row">
+            <label>Namespace<input id="item-namespace" maxlength="24" placeholder="myns" required pattern="[A-Za-z0-9_]{1,24}"></label>
+            <label>Item ID<input id="item-id" maxlength="24" placeholder="starbrick" required pattern="[A-Za-z0-9_]{1,24}"></label>
+          </div>
+          <p class="micro-note">Registry ID becomes <code id="item-id-preview">player:you:myns:starbrick</code></p>
+          <label>What kind of item?<select id="item-kind"><option value="block">Placeable block</option><option value="tool">Tool (mines faster)</option><option value="weapon">Weapon (attacks mobs)</option><option value="food">Food (heals)</option><option value="material">Material (crafting only)</option></select></label>
+          <div id="item-program" class="item-program">
+            <label>This item places <span class="optional">the block it is programmed with</span><select id="item-place-block"></select></label>
+            <p class="micro-note">Pick a block you published, or a built-in. Holding this item and right-clicking puts that block into the world.</p>
+          </div>
+          <div class="form-row" id="item-stats">
+            <label id="item-damage-row">Damage (0–50)<input id="item-damage" type="number" min="0" max="50" step="0.5" value="0"></label>
+            <label id="item-speed-row">Mining speed (×)<input id="item-speed" type="number" min="0.1" max="10" step="0.1" value="1"></label>
+            <label id="item-heal-row">Heals (hearts)<input id="item-heal" type="number" min="0" max="20" step="0.5" value="0"></label>
+            <label id="item-durability-row">Durability (0 = worn)<input id="item-durability" type="number" min="0" max="1000" value="0"></label>
+          </div>
+          <label>Colour<input id="item-colour" type="color" value="#c9a35f" class="colour-input"></label>
+          <div class="edit-note" id="item-edit-note" hidden>Editing <code id="item-edit-id"></code> — the ID cannot change. <button type="button" id="item-edit-cancel" class="text-button">Cancel edit</button></div>
+          <button class="button button-primary full" id="item-submit" type="submit">Publish item <span>＋</span></button>
+        </form>
+        <p class="micro-note">Items are declared, not coded: the game only runs the fixed actions above. Tools mine faster, weapons hurt mobs, food heals.</p>
+      </article>
+      <article class="panel">
+        <div class="panel-title"><div class="icon-box amber">⚒</div><div><h3 id="recipe-form-title">Recipe forge</h3><p id="recipe-form-sub">Make something new</p></div><span class="panel-number">03</span></div>
         <form id="recipe-form">
           <label>Recipe name<input id="recipe-name" maxlength="60" placeholder="e.g. Starstone brick" required></label>
           <label>Ingredients <span class="optional">comma-separated item IDs; repeat IDs for extra quantity</span><input id="recipe-ingredients" placeholder="builtin:stone, builtin:wood" required></label>
@@ -174,12 +212,16 @@
       <div id="my-blocks-list" class="registry-list"><div class="empty">You have not published any blocks yet.</div></div>
     </article>
     <article class="panel my-blocks-panel">
+      <div class="panel-title"><div class="icon-box amber">⛏</div><div><h3>My items</h3><p>Edit or remove items you created</p></div></div>
+      <div id="my-items-list" class="registry-list"><div class="empty">You have not published any items yet.</div></div>
+    </article>
+    <article class="panel my-blocks-panel">
       <div class="panel-title"><div class="icon-box amber">⚒</div><div><h3>My recipes</h3><p>Edit or remove recipes you created</p></div></div>
       <div id="my-recipes-list" class="registry-list"><div class="empty">You have not published any recipes yet.</div></div>
     </article>
   </dialog>
 
   <div id="toast" role="status" class="toast"></div>
-  <script src="./app.js?v=3"></script>
+  <script src="./app.js?v=10"></script>
 </body>
 </html>

@@ -34,7 +34,7 @@ const viewSettings = () => ({
 
 let username = localStorage.getItem("ac_username");
 // Saved character colours (server-side, mirrored for presence frames).
-const DEFAULT_APPEARANCE = { body_colour: "#3b6ea5", head_colour: "#d9a06b", accent_colour: "#2f8f4f" };
+const DEFAULT_APPEARANCE = { body_colour: "#3b6ea5", head_colour: "#d9a06b", accent_colour: "#2f8f4f", eye_colour: "#1d2430" };
 let appearance = { ...DEFAULT_APPEARANCE };
 let authenticated = false;
 // Remove the old JavaScript-readable bearer token. Authentication now uses an HttpOnly cookie.
@@ -42,11 +42,18 @@ localStorage.removeItem("ac_token");
 let authMode = "register";
 let toastTimer;
 let currentBlocks = [];
+let currentItems = [];
 let currentRecipes = [];
 // Inventory is server-side per account: the shared-world economy (placement
 // debits, breaking credits, crafting consumes) needs one authoritative copy.
 let inventory = {};
 let selectedItem = null;
+// Health is server-owned (the WorldLive object applies mob damage and writes
+// player_state.health); this is the mirror the HUD renders. 0 = dead.
+const MAX_HEALTH = 20;
+let health = MAX_HEALTH;
+let dead = false;
+let mobSnapshot = new Map(); // mob_id -> last snapshot, pruned every frame list
 
 function legacyInventoryKey() {
   return `ac_inventory_v1_${username ? username.toLowerCase() : "guest"}`;
@@ -141,6 +148,49 @@ function renderAdminTools(){
   $("add-item-form").hidden=!isAdmin();
   $("add-item-note").hidden=!isAdmin();
 }
+// Health bar: ten hearts, half hearts allowed (health is 0..20 server units).
+function renderHealth(){
+  const hearts=$("hud-health");
+  if(!hearts)return;
+  const full=Math.floor(health/2), half=health-full*2>=1?1:0;
+  let out='<span class="hud-health-label">♥</span>';
+  for(let i=0;i<10;i++)out+=`<span class="heart ${i<full?"full":i===full&&half?"half":"empty"}"></span>`;
+  hearts.innerHTML=out;
+  hearts.hidden=!dveView;
+}
+function showDeath(cause){
+  dead=true;
+  $("death-cause").textContent=cause||"The world got the better of you.";
+  $("death-screen").hidden=false;
+  if(dveView){dveView.releaseInput();dveView.setFrozen(true);}
+  syncGrabBtn();
+  renderHealth();
+}
+function hideDeath(){
+  dead=false;
+  $("death-screen").hidden=true;
+  if(dveView)dveView.setFrozen(false);
+}
+$("death-respawn").addEventListener("click",async()=>{
+  try{
+    const data=await api("/api/player/respawn",{method:"POST",body:"{}"});
+    health=Number(data.health)??MAX_HEALTH;
+    hideDeath();
+    if(dveView&&data.state)dveView.setPose(data.state);
+    renderHealth();
+    if(dveView)dveView.grabPointer();
+    toast("Respawned — the world is unkind, try again.");
+  }catch(err){toast(err.message,true);}
+});
+$("death-menu").addEventListener("click",()=>{
+  hideDeath();
+  $("death-screen").hidden=true;
+  updateServerChip();updateAccountChip();
+  $("main-menu").showModal();
+  if(dveView)dveView.releaseInput();
+  $("game").hidden=true;
+  syncGrabBtn();
+});
 function setAuthenticatedUser(name){
   username=name;
   authenticated=true;
@@ -149,6 +199,7 @@ function setAuthenticatedUser(name){
   renderInventory();
   renderCrafting();
   renderMyBlocks();
+  renderMyItems();
   renderMyRecipes();
   renderAdminTools();
   migrateLegacyInventory().then(refreshInventory);
@@ -163,6 +214,7 @@ function clearAuthenticatedUser(){
   renderInventory();
   renderCrafting();
   renderMyBlocks();
+  renderMyItems();
   renderMyRecipes();
   renderAdminTools();
 }
@@ -249,15 +301,16 @@ $("auth-form").addEventListener("submit",async e=>{
 
 async function refreshRegistry(){
   try{
-    const [blocks,recipes]=await Promise.all([api("/api/blocks"),api("/api/recipes")]);
+    const [blocks,items,recipes]=await Promise.all([api("/api/blocks"),api("/api/items"),api("/api/recipes")]);
     setConnection(true);
     currentBlocks=Array.isArray(blocks.blocks)?blocks.blocks:[];
+    currentItems=Array.isArray(items.items)?items.items:[];
     currentRecipes=Array.isArray(recipes.recipes)?recipes.recipes:[];
-    renderInventory();renderCrafting();renderMyBlocks();renderMyRecipes();
+    renderInventory();renderCrafting();renderMyBlocks();renderMyItems();renderMyRecipes();renderItemProgramSelect();
   }catch(err){
-    setConnection(false);currentBlocks=[];currentRecipes=[];
+    setConnection(false);currentBlocks=[];currentItems=[];currentRecipes=[];
     renderInventory();$("crafting-list").innerHTML='<div class="empty">Recipes are unavailable until the API reconnects.</div>';
-    renderMyBlocks();renderMyRecipes();
+    renderMyBlocks();renderMyItems();renderMyRecipes();renderItemProgramSelect();
   }
 }
 function escapeHtml(v){return String(v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
@@ -296,10 +349,30 @@ $("clear-inventory-button").addEventListener("click",async()=>{
   catch(err){toast(err.message,true);}
 });
 function blockById(id){return currentBlocks.find(block=>block.id===id);}
+function itemById(id){return currentItems.find(item=>item.id===id);}
+// Inventory rows describe ITEMS. A stack keyed by a raw block id (older data)
+// falls back to the block it resembles, so it still renders and can be placed.
+function itemMeta(id){
+  const item=itemById(id);
+  if(item)return item;
+  const block=blockById(id);
+  return block?{id,name:block.name,colour:block.colour,kind:"block",place_block_id:block.id,damage:0,speed:1,heal:0,durability:0,is_builtin:1}:null;
+}
+const KIND_LABEL={block:"block",tool:"tool",weapon:"weapon",food:"food",material:"material"};
+function itemStatLine(item){
+  const bits=[];
+  if(Number(item.damage)>0)bits.push(`damage ${Number(item.damage)}`);
+  if(Number(item.speed)>1)bits.push(`mining ×${Number(item.speed)}`);
+  if(Number(item.heal)>0)bits.push(`heals ${Number(item.heal)}`);
+  if(Number(item.durability)>0)bits.push(`${Number(item.durability)} uses`);
+  if(item.kind==="block")bits.push(`places ${item.place_block_id||"—"}`);
+  return bits.join(" · ");
+}
 function selectItem(id){
   selectedItem=id;
   renderInventory();renderHotbar();
-  $("hud-held").textContent=selectedItem?(blockById(selectedItem)||{name:selectedItem}).name:"no item";
+  const meta=id?itemMeta(id):null;
+  $("hud-held").textContent=meta?`${meta.name}${KIND_LABEL[meta.kind]?` · ${KIND_LABEL[meta.kind]}`:""}`:(id||"no item");
 }
 function renderInventory(){
   const entries=Object.entries(inventory).sort(([a],[b])=>a.localeCompare(b));
@@ -308,9 +381,11 @@ function renderInventory(){
   renderHotbar();
   if(!entries.length){$("inventory-list").innerHTML=`<div class="empty">${authenticated?"Your inventory is empty. Break blocks in the world or add items above.":"Log in — your inventory lives on your account."}</div>`;return;}
   $("inventory-list").innerHTML=entries.map(([id,quantity])=>{
-    const block=blockById(id);const label=block?block.name:id;const colour=block&&/^#[0-9a-f]{6}$/i.test(block.colour)?block.colour:"#64748b";
+    const meta=itemMeta(id);const label=meta?meta.name:id;const colour=meta&&/^#[0-9a-f]{6}$/i.test(meta.colour)?meta.colour:"#64748b";
     const selected=id===selectedItem?" selected":"";
-    return `<div class="inventory-item${selected}" data-item-id="${escapeAttr(id)}"><span class="swatch" style="background:${escapeAttr(colour)}"></span><div class="item-info"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(id)}</small></div><span class="item-quantity">×${quantity}</span><button class="remove-item" type="button" data-remove-item="${escapeAttr(id)}" aria-label="Remove one ${escapeAttr(id)}">−1</button></div>`;
+    const kind=meta?KIND_LABEL[meta.kind]||meta.kind:"unknown";
+    const stats=meta?itemStatLine(meta):"not in the registry — it cannot be placed or used";
+    return `<div class="inventory-item${selected}" data-item-id="${escapeAttr(id)}"><span class="swatch" style="background:${escapeAttr(colour)}"></span><div class="item-info"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(id)}</small><small class="item-kind kind-${escapeAttr(kind)}">${escapeHtml(kind)}</small>${stats?`<small class="item-stats">${escapeHtml(stats)}</small>`:""}</div><span class="item-quantity">×${quantity}</span><button class="remove-item" type="button" data-remove-item="${escapeAttr(id)}" aria-label="Remove one ${escapeAttr(id)}">−1</button></div>`;
   }).join("");
 }
 
@@ -318,9 +393,11 @@ function renderInventory(){
 function renderHotbar(){
   const entries=Object.entries(inventory).sort(([a],[b])=>a.localeCompare(b)).slice(0,9);
   $("hotbar").innerHTML=entries.map(([id,quantity],i)=>{
-    const block=blockById(id);const colour=block&&/^#[0-9a-f]{6}$/i.test(block.colour)?block.colour:"#64748b";
+    const meta=itemMeta(id);const colour=meta&&/^#[0-9a-f]{6}$/i.test(meta.colour)?meta.colour:"#64748b";
     const selected=id===selectedItem?" hotbar-selected":"";
-    return `<div class="hotbar-slot${selected}" data-slot-id="${escapeAttr(id)}" title="${escapeAttr(block?block.name+" — "+id:id)}"><span class="hotbar-key">${i+1}</span><span class="swatch" style="background:${escapeAttr(colour)}"></span><span class="hotbar-qty">${quantity}</span></div>`;
+    const glyph=meta&&meta.kind==="weapon"?"⚔":meta&&meta.kind==="tool"?"⛏":meta&&meta.kind==="food"?"✚":"";
+    const label=meta?`${meta.name} — ${id}`:id;
+    return `<div class="hotbar-slot${selected}" data-slot-id="${escapeAttr(id)}" title="${escapeAttr(label)}"><span class="hotbar-key">${i+1}</span><span class="swatch" style="background:${escapeAttr(colour)}"></span>${glyph?`<span class="hotbar-glyph">${glyph}</span>`:""}<span class="hotbar-qty">${quantity}</span></div>`;
   }).join("");
 }
 $("hotbar").addEventListener("click",e=>{
@@ -445,6 +522,132 @@ $("my-blocks-list").addEventListener("click",async e=>{
     await Promise.all([refreshRegistry(),refreshInventory()]);
     toast(`Block ${id} removed — placed copies cleared from the world.`);
   }catch(err){pendingDelete.delete(id);renderMyBlocks();toast(err.message,true);}
+});
+
+// ---- Item forge: publish, edit, delete (own items) ---------------------------
+// The item IS the behaviour: kind + programme. A "block" item names the block
+// it places (its programme); tools/weapons/food carry stats. No code, ever.
+let editingItemId=null;
+const pendingItemDelete=new Set();
+function itemFormTitle(){
+  $("item-form-title").textContent=editingItemId?"Edit item":"Item forge";
+  $("item-form-sub").textContent=editingItemId?"Changes apply to the live registry.":"Program an item: what it does when used";
+  $("item-submit").innerHTML=editingItemId?"Save changes":'Publish item <span>＋</span>';
+}
+function updateItemFormKind(){
+  const kind=$("item-kind").value;
+  $("item-program").hidden=kind!=="block";
+  const show=(rowId,on)=>{$(rowId).hidden=!on;};
+  show("item-damage-row",kind==="weapon"||kind==="tool");
+  show("item-speed-row",kind==="tool"||kind==="weapon");
+  show("item-heal-row",kind==="food");
+  show("item-durability-row",kind==="tool"||kind==="weapon");
+  updateItemIdPreview();
+}
+function renderItemProgramSelect(){
+  const select=$("item-place-block");
+  if(!select)return;
+  const current=select.value;
+  const options=currentBlocks.filter(b=>b.id!=="builtin:bedrock").map(b=>`<option value="${escapeAttr(b.id)}">${escapeHtml(b.name)} — ${escapeAttr(b.id)}</option>`).join("");
+  select.innerHTML=options||'<option value="">No blocks in the registry yet</option>';
+  if(current&&[...select.options].some(o=>o.value===current))select.value=current;
+}
+$("item-kind").addEventListener("change",updateItemFormKind);
+updateItemFormKind(); // show the right stat rows before the first edit
+function updateItemIdPreview(){
+  const user=(username||"you").toLowerCase();
+  const ns=($("item-namespace").value.trim()||"myns").toLowerCase();
+  const id=($("item-id").value.trim()||"starbrick").toLowerCase();
+  $("item-id-preview").textContent=`player:${user}:${ns}:${id}`;
+}
+$("item-namespace").addEventListener("input",updateItemIdPreview);
+$("item-id").addEventListener("input",updateItemIdPreview);
+$("item-form").addEventListener("submit",async e=>{
+  e.preventDefault();
+  if(!authenticated){openAuth("login");toast("Log in to publish an item.");return;}
+  const kind=$("item-kind").value;
+  const body={
+    name:$("item-name").value,kind,colour:$("item-colour").value,
+    place_block_id:kind==="block"?$("item-place-block").value:null,
+    damage:Number($("item-damage").value)||0,
+    speed:Number($("item-speed").value)||1,
+    heal:Number($("item-heal").value)||0,
+    durability:Number($("item-durability").value)||0,
+  };
+  if(kind==="block"&&!body.place_block_id){toast("Pick the block this item places.",true);return;}
+  try{
+    if(editingItemId){
+      await api(`/api/items/${encodeURIComponent(editingItemId)}`,{method:"PUT",body:JSON.stringify(body)});
+      toast(`Item “${body.name}” updated.`);
+      exitItemEdit();
+    }else{
+      await api("/api/items",{method:"POST",body:JSON.stringify({...body,namespace:$("item-namespace").value,id:$("item-id").value})});
+      toast("Item published. Craft or obtain it, then use it in the world.");
+      e.target.reset();$("item-colour").value="#c9a35f";$("item-kind").value="block";$("item-speed").value=1;
+      $("item-damage").value=0;$("item-heal").value=0;$("item-durability").value=0;
+      updateItemFormKind();updateItemIdPreview();
+    }
+    await refreshRegistry();
+    await refreshInventory();
+  }
+  catch(err){toast(err.message,true);}
+});
+function enterItemEdit(item){
+  editingItemId=item.id;
+  pendingItemDelete.clear();
+  const parts=item.id.split(":");
+  const namespace=item.id.startsWith("player:")?parts[2]:"";
+  const localId=item.id.startsWith("player:")?parts.slice(3).join(":"):item.id;
+  $("item-name").value=item.name;$("item-namespace").value=namespace;$("item-id").value=localId;
+  $("item-kind").value=item.kind;
+  renderItemProgramSelect();
+  if(item.place_block_id)$("item-place-block").value=item.place_block_id;
+  $("item-damage").value=Number(item.damage)||0;$("item-speed").value=Number(item.speed)||1;
+  $("item-heal").value=Number(item.heal)||0;$("item-durability").value=Number(item.durability)||0;
+  $("item-colour").value=/^#[0-9a-f]{6}$/i.test(item.colour)?item.colour:"#c9a35f";
+  updateItemFormKind();
+  $("item-namespace").readOnly=true;$("item-id").readOnly=true;
+  $("item-edit-note").hidden=false;$("item-edit-id").textContent=item.id;
+  itemFormTitle();
+  $("item-form").scrollIntoView({behavior:"smooth",block:"center"});
+}
+function exitItemEdit(){
+  editingItemId=null;
+  $("item-namespace").readOnly=false;$("item-id").readOnly=false;
+  $("item-edit-note").hidden=true;
+  itemFormTitle();
+  $("item-form").reset();
+  $("item-colour").value="#c9a35f";$("item-kind").value="block";$("item-speed").value=1;
+  $("item-damage").value=0;$("item-heal").value=0;$("item-durability").value=0;
+  updateItemFormKind();updateItemIdPreview();
+}
+$("item-edit-cancel").addEventListener("click",exitItemEdit);
+function renderMyItems(){
+  const list=$("my-items-list");
+  if(!authenticated){list.innerHTML='<div class="empty">Log in to manage your own items.</div>';return;}
+  const mine=currentItems.filter(it=>String(it.creator||"").toLowerCase()===(username||"").toLowerCase());
+  if(!mine.length){list.innerHTML='<div class="empty">You have not published any items yet.</div>';return;}
+  list.innerHTML=mine.map(it=>{
+    const pending=pendingItemDelete.has(it.id);
+    const stats=itemStatLine(it);
+    return `<div class="registry-item"><span class="swatch" style="background:${escapeAttr(it.colour)}"></span><div class="item-info"><strong>${escapeHtml(it.name)}</strong><small>${escapeHtml(it.id)} · ${escapeHtml(KIND_LABEL[it.kind]||it.kind)}${stats?` · ${escapeHtml(stats)}`:""}</small></div><div class="my-block-actions"><button class="button button-outline" type="button" data-mi-edit="${escapeAttr(it.id)}">Edit</button><button class="button ${pending?"button-danger":"button-outline"}" type="button" data-mi-del="${escapeAttr(it.id)}">${pending?"Really delete?":"Delete"}</button></div></div>`;
+  }).join("");
+}
+$("my-items-list").addEventListener("click",async e=>{
+  const edit=e.target.closest("[data-mi-edit]");
+  if(edit){const item=itemById(edit.dataset.miEdit);if(item)enterItemEdit(item);return;}
+  const del=e.target.closest("[data-mi-del]");
+  if(!del)return;
+  const id=del.dataset.miDel;
+  if(!pendingItemDelete.has(id)){pendingItemDelete.add(id);renderMyItems();return;} // two-step
+  try{
+    await api(`/api/items/${encodeURIComponent(id)}`,{method:"DELETE"});
+    pendingItemDelete.delete(id);
+    if(editingItemId===id)exitItemEdit();
+    if(selectedItem===id)selectItem(null);
+    await Promise.all([refreshRegistry(),refreshInventory()]);
+    toast(`Item ${id} removed.`);
+  }catch(err){pendingItemDelete.delete(id);renderMyItems();toast(err.message,true);}
 });
 
 // ---- Recipes: publish, edit (own recipes), delete (own recipes) --------------
@@ -574,15 +777,17 @@ function renderCharacterPreview(){
   $("char-head").value=appearance.head_colour;
   $("char-body").value=appearance.body_colour;
   $("char-legs").value=appearance.accent_colour;
+  $("char-eyes").value=appearance.eye_colour;
   const p=$("character-preview");
   p.style.setProperty("--head",appearance.head_colour);
   p.style.setProperty("--body",appearance.body_colour);
   p.style.setProperty("--legs",appearance.accent_colour);
+  p.style.setProperty("--eyes",appearance.eye_colour);
 }
 function readCharacterInputs(){
-  appearance={head_colour:$("char-head").value,body_colour:$("char-body").value,accent_colour:$("char-legs").value};
+  appearance={head_colour:$("char-head").value,body_colour:$("char-body").value,accent_colour:$("char-legs").value,eye_colour:$("char-eyes").value};
 }
-["char-head","char-body","char-legs"].forEach(id=>$(id).addEventListener("input",()=>{readCharacterInputs();renderCharacterPreview();}));
+["char-head","char-body","char-legs","char-eyes"].forEach(id=>$(id).addEventListener("input",()=>{readCharacterInputs();renderCharacterPreview();}));
 $("character-save").addEventListener("click",async()=>{
   if(!authenticated){openAuth("login");toast("Log in to save your character.");return;}
   readCharacterInputs();
@@ -601,19 +806,21 @@ $("hud-studio").addEventListener("click",()=>$("studio-dialog").showModal());
 document.querySelectorAll("dialog").forEach(d=>d.addEventListener("close",()=>{
   // Exiting any menu back into the game re-grabs the cursor (best effort:
   // Chrome may refuse right after an Esc-exit — the HUD button covers it).
-  if(dveView&&!document.querySelector("dialog[open]"))dveView.grabPointer();
+  // Never while dead: the corpse keeps the cursor free for the death screen.
+  if(dveView&&!document.querySelector("dialog[open]")&&$("death-screen").hidden)dveView.grabPointer();
 }));
 
 // Cursor-grab button: visible only while the game is up and the cursor is
 // free, so the player can hand the mouse back to the game after any release.
 const grabBtn=$("hud-grab");
-function syncGrabBtn(){grabBtn.hidden=!!document.pointerLockElement||!dveView||$("game").hidden;}
+function syncGrabBtn(){grabBtn.hidden=!!document.pointerLockElement||!dveView||$("game").hidden||!$("death-screen").hidden;}
 document.addEventListener("pointerlockchange",()=>{
   syncGrabBtn();
   // Escape while playing: Chrome exits pointer lock and swallows the key, so
   // this is where "Esc opens the pause menu" has to be handled. Only when the
-  // release was not caused by opening a menu or leaving the game screen.
-  if(!document.pointerLockElement&&dveView&&!$("game").hidden&&!document.querySelector("dialog[open]"))openPause();
+  // release was not caused by opening a menu or leaving the game screen — and
+  // never when it was death releasing it (the death screen owns that moment).
+  if(!document.pointerLockElement&&dveView&&!$("game").hidden&&$("death-screen").hidden&&!document.querySelector("dialog[open]"))openPause();
 });
 setInterval(syncGrabBtn,500);
 grabBtn.addEventListener("click",()=>{if(dveView)dveView.grabPointer();});
@@ -648,24 +855,105 @@ function connectLive(){
   ws.onopen=()=>{wsRetry=0;setConnection(true);sendPresence(true);};
   ws.onmessage=event=>{try{const m=JSON.parse(event.data);
     if(m.type==="edit")noteEdit(m.x,m.y,m.z,m.block_id);
-    else if(m.type==="roster")for(const p of m.players||[])if(dveView&&p.name!==username)dveView.setRemote(p.name,p.x,p.y,p.z,p.yaw,p.appearance);
-    else if(m.type==="pose"&&dveView&&m.name!==username)dveView.setRemote(m.name,m.x,m.y,m.z,m.yaw,m.appearance);
+    else if(m.type==="roster"){for(const p of m.players||[])if(dveView&&p.name!==username)dveView.setRemote(p.name,p.x,p.y,p.z,p.yaw,p.appearance,p.vx,p.vy,p.vz);}
+    else if(m.type==="pose"&&dveView&&m.name!==username)dveView.setRemote(m.name,m.x,m.y,m.z,m.yaw,m.appearance,m.vx,m.vy,m.vz);
     else if(m.type==="leave"&&dveView)dveView.removeRemote(m.name);
+    else if(m.type==="mobs"&&dveView)applyMobSnapshot(m.mobs||[]);
+    else if(m.type==="health")applyHealth(m);
+    else if(m.type==="hurt")applyHealth(m);
+    else if(m.type==="died")applyDeath(m);
+    else if(m.type==="respawn")applyRespawn(m);
   }catch{/* ignore non-JSON frames */}};
   ws.onclose=()=>{setConnection(false);setTimeout(connectLive,Math.min(15000,500*2**wsRetry++));};
   ws.onerror=()=>{try{ws.close();}catch{/* already closed */}};
 }
 // Presence: advertise our pose ~4 Hz over the same socket (name identifies
-// the player; the server fans poses out to everyone else).
-let presenceAt=0;
+// the player; the server fans poses out to everyone else). Velocities ride
+// along so receivers can dead-reckon between frames instead of stepping.
+let presenceAt=0,lastPose=null;
 function sendPresence(force){
   if(!ws||ws.readyState!==1||!dveView)return;
   const p=dveView.pose;
-  if(!force&&Date.now()-presenceAt<250)return;
-  presenceAt=Date.now();
-  try{ws.send(JSON.stringify({type:"pose",name:username||"someone",x:p.x,y:p.y,z:p.z,yaw:p.yaw,appearance}));}catch{/* racing a close */}
+  const now=Date.now();
+  if(!force&&now-presenceAt<250)return;
+  let vx=0,vy=0,vz=0;
+  if(lastPose){
+    const dt=Math.max(0.05,(now-lastPose.t)/1000);
+    vx=(p.x-lastPose.x)/dt;vy=(p.y-lastPose.y)/dt;vz=(p.z-lastPose.z)/dt;
+  }
+  lastPose={t:now,x:p.x,y:p.y,z:p.z};
+  presenceAt=now;
+  try{ws.send(JSON.stringify({type:"pose",name:username||"someone",x:p.x,y:p.y,z:p.z,yaw:p.yaw,appearance,vx,vy,vz}));}catch{/* racing a close */}
 }
 setInterval(sendPresence,250);
+
+// ---- Mobs + health ------------------------------------------------------------
+// The WorldLive object simulates mobs and owns health; this client renders the
+// snapshot and reports attacks. `mobs` arrives ~4 Hz with the full live list.
+function applyMobSnapshot(list){
+  const seen=new Set();
+  for(const mob of list){
+    seen.add(mob.id);
+    dveView.setMob(mob.id,mob.kind||"slime",Number(mob.x)||0,Number(mob.y)||0,Number(mob.z)||0,Number(mob.yaw)||0,mob.hostile===true);
+  }
+  for(const id of mobSnapshot.keys())if(!seen.has(id)){dveView.removeMob(id);mobSnapshot.delete(id);}
+  for(const mob of list)mobSnapshot.set(mob.id,mob);
+}
+function applyHealth(m){
+  const value=Number(m.health);
+  const amount=Number(m.amount)||0;
+  if(amount>0)flashDamage();
+  // The object is authoritative: use its health when the frame carries it,
+  // otherwise apply the reported damage locally until the health frame lands.
+  health=Number.isFinite(value)?Math.max(0,Math.min(MAX_HEALTH,value)):Math.max(0,health-amount);
+  if(health<=0){applyDeath(m);return;}
+  if(dead)hideDeath();
+  renderHealth();
+}
+function applyDeath(m){
+  health=0;
+  renderHealth();
+  if(!dead)showDeath(m&&m.by?`A ${String(m.by).replace(/_/g," ")} got you.`:null);
+}
+function applyRespawn(m){
+  health=Math.max(1,Math.min(MAX_HEALTH,Number(m.health)||MAX_HEALTH));
+  hideDeath();
+  if(m.state&&dveView)dveView.setPose(m.state);
+  renderHealth();
+}
+function flashDamage(){
+  const el=$("damage-flash");
+  if(!el)return;
+  el.classList.remove("hit");
+  void el.offsetWidth; // restart the CSS animation
+  el.classList.add("hit");
+}
+// Left-click with a weapon/tool aimed at a mob is an attack, not a block break.
+function attackMobUnderCrosshair(){
+  const meta=selectedItem?itemMeta(selectedItem):null;
+  if(!meta||(meta.kind!=="weapon"&&meta.kind!=="tool"))return false;
+  if(!dveView.pickMob)return false;
+  const mob=dveView.pickMob();
+  if(!mob)return false;
+  if(ws&&ws.readyState===1){
+    try{ws.send(JSON.stringify({type:"attack",mob_id:mob.id,item_id:selectedItem}));}catch{/* racing a close */}
+    return true;
+  }
+  return false;
+}
+// Food: right-click (or F) with a food item selected eats one unit.
+async function eatSelected(){
+  const meta=selectedItem?itemMeta(selectedItem):null;
+  if(!meta||meta.kind!=="food"){toast("Select a food item to eat.",true);return;}
+  if(health>=MAX_HEALTH){toast("You are already at full health.",true);return;}
+  try{
+    const data=await api("/api/player/eat",{method:"POST",body:JSON.stringify({item_id:selectedItem})});
+    health=Math.max(0,Math.min(MAX_HEALTH,Number(data.health)||health));
+    renderHealth();
+    await refreshInventory();
+    toast(`Ate ${meta.name}.`);
+  }catch(err){toast(err.message,true);}
+}
 // While the socket is down, polling (since=headSeq) fills the gap.
 setInterval(()=>{if(!ws||ws.readyState>1)loadWorldAll();},4000);
 
@@ -695,6 +983,7 @@ async function initGameView(){
     const r=await api("/api/player/state");
     spawn=r.state;
     if(r.appearance)appearance={...DEFAULT_APPEARANCE,...r.appearance};
+    if(Number.isFinite(Number(r.health))){health=Math.max(0,Math.min(MAX_HEALTH,Number(r.health)));}
   }catch{/* default spawn on surface */}
   dveView=await dveMod.createDVEView($("game-canvas"),currentBlocks,API_BASE,{
     settings:viewSettings(),
@@ -702,6 +991,10 @@ async function initGameView(){
     spawn:spawn||undefined,
   });
   $("game-loading").hidden=true;
+  // A player who left while dead comes back dead: the object already ignores
+  // their pose frames, so the client shows the death screen and parks the body.
+  if(health<=0)applyDeath(null);else hideDeath();
+  renderHealth();
   startStateSaver();
   // Presence: advertise ourselves and pull the current roster of players.
   if(ws&&ws.readyState===1){try{ws.send(JSON.stringify({type:"who"}));}catch{}sendPresence(true);}
@@ -743,6 +1036,9 @@ gameCanvas.addEventListener("pointerup",async e=>{
   await gameAction(e.button===0?2:0);
 });
 async function gameAction(button){
+  if(dead){toast("You are dead — respawn first.",true);return;}
+  // Left-click aimed at a mob, holding a weapon or tool: attack, don't dig.
+  if(button===2&&attackMobUnderCrosshair())return;
   let hit=null;
   try{hit=await dveView.pickCenter();}catch{/* pick failed: treat as nothing in reach */}
   if(!hit||!hit.position){toast("Nothing in reach — aim the crosshair at a block.",true);return;}
@@ -773,13 +1069,15 @@ document.addEventListener("keydown",e=>{
   if(e.key==="Escape"){
     // While the pointer is locked Chrome consumes Escape itself (it exits the
     // lock without firing a keydown), and the pointerlockchange handler opens
-    // the pause menu there; this branch covers the unlocked case.
-    openPause();
+    // the pause menu there; this branch covers the unlocked case. A corpse has
+    // nothing to pause: the death screen owns the keyboard until respawn.
+    if($("death-screen").hidden)openPause();
     return;
   }
   if(e.key==="e"||e.key==="E"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();openCharacterDialog();return;}
   if(e.key==="i"||e.key==="I"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();openInventoryDialog();return;}
   if(e.key==="b"||e.key==="B"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();$("studio-dialog").showModal();return;}
+  if(e.key==="f"||e.key==="F"){e.preventDefault();eatSelected();return;}
   if(/^Digit[1-9]$/.test(e.code)){
     const entries=Object.entries(inventory).sort(([a],[b])=>a.localeCompare(b)).slice(0,9);
     const entry=entries[Number(e.code.slice(5))-1];

@@ -112,7 +112,9 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
   canvas.addEventListener("pointerdown", e => {
     if (e.button > 2) return;
     dragging = true; lastX = e.clientX; lastY = e.clientY;
-    if (!locked && canvas.requestPointerLock) {
+    // A dead player keeps the cursor free: clicking the canvas (or through the
+    // death screen's gaps) must not take the pointer lock back.
+    if (!locked && !frozen && canvas.requestPointerLock) {
       try { canvas.requestPointerLock(); } catch { /* fall back to drag-look */ }
     }
   });
@@ -153,6 +155,9 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
 
   let vy = 0;
   let grounded = false;
+  // A dead body is parked: the object ignores a dead player's pose frames,
+  // so the client must not walk away from where it fell.
+  let frozen = false;
 
   const solidVoxel = (bx, by, bz) => {
     if (by < SLAB.Y0 || by >= SLAB.Y1) return false;
@@ -181,6 +186,7 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
   const tick = () => {
     const dt = Math.min(0.1, engine.getDeltaTime() / 1000);
     camera.rotation.y = yaw; camera.rotation.x = pitch;
+    if (frozen) { vy = 0; return; }
     // Hold Shift (or Ctrl) to sprint.
     const sprint = keys.has("ShiftLeft") || keys.has("ShiftRight") ||
       keys.has("ControlLeft") || keys.has("ControlRight");
@@ -361,6 +367,49 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     [1.00, 0.03, 0.05, 0.12, 0.30],
   ];
   const dayT = () => (Date.now() % DAY_MS) / DAY_MS;
+
+  // ---- Sun & Moon ------------------------------------------------------------
+  // Two emissive discs on one empty root. infiniteDistance only takes effect
+  // on an UNPARENTED node (Babylon ignores it on children), so the camera-
+  // pinning lives on the root and both discs inherit it. Their rendering
+  // group is 0 ON PURPOSE — the opposite of the avatar/glow rule (VOXEL_GROUP
+  // = 1): Babylon clears the depth buffer between groups, group 0 draws
+  // before the voxels, so terrain occludes the sky bodies instead of the
+  // discs burning through the world.
+  const skyRoot = new Mesh("sky-root", scene);
+  skyRoot.infiniteDistance = true;
+  const skyDisc = (name, radius, hex) => {
+    const m = MeshBuilder.CreateDisc(name, { radius, tessellation: 32 }, scene);
+    m.parent = skyRoot;
+    m.billboardMode = Mesh.BILLBOARDMODE_ALL;
+    m.applyFog = false;
+    m.isPickable = false;
+    m.infiniteDistance = true; // inert while parented; documents intent
+    m.renderingGroupId = 0;
+    const mat = new StandardMaterial(`${name}-mat`, scene);
+    const c = Color3.FromHexString(hex);
+    mat.emissiveColor = c;
+    mat.diffuseColor = c;
+    mat.disableLighting = true;
+    m.material = mat;
+    return m;
+  };
+  const sun = skyDisc("sun", 18, "#ffd27a");
+  const moon = skyDisc("moon", 13, "#dfe6f2");
+  const SKY_TILT = 0.41; // ~23.5 deg obliquity: the orbit leans, rise/set sit off-vertical
+  const placeSkyBodies = t => {
+    // Orbit on a tilted axis, sun and moon on opposite ends: sun overhead at
+    // t=0.5 (noon), moon overhead at t=0 (midnight). Distance rides the
+    // camera's far plane so the discs always sit inside the frustum.
+    const d = clamp(camera.maxZ * 0.4, 200, 700);
+    const a = 2 * Math.PI * t;
+    const ux = Math.sin(a), uy = -Math.cos(a);
+    const x = ux * Math.cos(SKY_TILT) - uy * Math.sin(SKY_TILT);
+    const y = ux * Math.sin(SKY_TILT) + uy * Math.cos(SKY_TILT);
+    sun.position.set(x * d, y * d, 0);
+    moon.position.set(-x * d, -y * d, 0);
+  };
+
   const applyDayNight = () => {
     const t = dayT();
     let a = SKY[SKY.length - 2], b = SKY[SKY.length - 1];
@@ -377,6 +426,7 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
       0, 0, L, 0,
       0, 0, 0, 1,
     ]);
+    placeSkyBodies(t);
   };
   // ---- Remote players --------------------------------------------------------
   // Presence fan-out (WS "pose" frames from the WorldLive object) draws a
@@ -388,6 +438,7 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     body_colour: hexColour(a && a.body_colour) || "#3b6ea5",
     head_colour: hexColour(a && a.head_colour) || "#d9a06b",
     accent_colour: hexColour(a && a.accent_colour) || "#2f8f4f",
+    eye_colour: hexColour(a && a.eye_colour) || "#1d2430",
   });
   const remotes = new Map();
   const ensureRemote = (name, appearance) => {
@@ -396,9 +447,9 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     const root = new Mesh("player", scene);
     root.renderingGroupId = VOXEL_GROUP;
     const parts = [];
-    const part = (w, h, d, y, key) => {
+    const part = (w, h, d, y, key, x = 0, z = 0) => {
       const m = MeshBuilder.CreateBox("part", { width: w, height: h, depth: d }, scene);
-      m.position.y = y;
+      m.position.set(x, y, z);
       m.parent = root;
       m.renderingGroupId = VOXEL_GROUP;
       const mat = new StandardMaterial("part-mat", scene);
@@ -409,6 +460,11 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     part(0.5, 0.9, 0.3, 0.45, "accent_colour");   // legs
     part(0.6, 0.55, 0.35, 1.22, "body_colour");   // body
     part(0.4, 0.35, 0.35, 1.67, "head_colour");   // head
+    // Eyes sit on the +Z face of the head (rotation.y = the sender's camera
+    // yaw, so yaw 0 faces +Z). They are the facing cue for other players and
+    // the fourth customisable colour.
+    part(0.11, 0.1, 0.06, 1.72, "eye_colour", 0.1, 0.19);
+    part(0.11, 0.1, 0.06, 1.72, "eye_colour", -0.1, 0.19);
     const label = MeshBuilder.CreatePlane("name", { width: Math.min(2.2, 0.25 + String(name).length * 0.13), height: 0.34 }, scene);
     label.position.y = 2.15;
     label.parent = root;
@@ -430,7 +486,7 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     lmat.opacityTexture = tex;
     lmat.disableLighting = true;
     label.material = lmat;
-    r = { root, parts, look: null, rx: NaN, ry: 0, target: null, last: 0 };
+    r = { root, parts, look: null, rx: NaN, ry: 0, target: null, last: 0, vx: 0, vy: 0, vz: 0 };
     remotes.set(name, r);
     applyLook(r, appearance);
     return r;
@@ -443,11 +499,14 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     for (const { mat, key } of r.parts) {
       const col = Color3.FromHexString(parsed[key]);
       mat.diffuseColor = col;
-      mat.emissiveColor = col.scale(0.3);
+      // Eyes carry a little more self-illumination so the facing cue survives
+      // the night, when diffuse shading is nearly black.
+      mat.emissiveColor = col.scale(key === "eye_colour" ? 0.6 : 0.3);
     }
   };
   const advanceRemotes = () => {
     const now = Date.now();
+    const dt = Math.min(0.1, engine.getDeltaTime() / 1000);
     for (const [name, r] of remotes) {
       if (now - r.last > 60_000) { // stale: player left or went silent
         r.root.dispose(false, true);
@@ -456,15 +515,150 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
       }
       if (!r.target) continue;
       const t = r.target;
-      if (Number.isNaN(r.rx)) { r.rx = t.x; r.ry = t.yaw; }
-      r.rx += (t.x - r.rx) * 0.2;
-      const rz = r.root.position.z;
-      r.root.position.set(r.rx, t.y - EYE, rz + (t.z - rz) * 0.2);
-      let dy = t.yaw - r.ry;
-      while (dy > Math.PI) dy -= 2 * Math.PI;
-      while (dy < -Math.PI) dy += 2 * Math.PI;
-      r.ry += dy * 0.25;
-      r.root.rotation.y = r.ry;
+      // Dead-reckon: while waiting for the next 5 Hz pose frame, coast the
+      // avatar along its reported velocity (blocks/sec) so motion stays
+      // fluid between frames. Capped at 0.6 s: a player who stops
+      // broadcasting freezes near their last true pose instead of running
+      // away forever.
+      let px = t.x, py = t.y, pz = t.z;
+      const drift = Math.min(0.6, (now - r.last) / 1000);
+      if (drift > 0 && (r.vx || r.vy || r.vz)) {
+        px += r.vx * drift; py += r.vy * drift; pz += r.vz * drift;
+        // Keep the extrapolated body above ground using the same surface
+        // walk as the local player — but only near the local player, so a
+        // column scan per distant avatar per frame costs nothing.
+        const dxc = px - camera.position.x, dzc = pz - camera.position.z;
+        if (dxc * dxc + dzc * dzc < 2304) py = Math.max(py, surfaceEye(px, pz));
+        // Never let extrapolation shove the avatar through the camera: if
+        // the predicted body would engulf the eye, keep the last true pose.
+        if (dxc * dxc + dzc * dzc < 1 && py - 1.8 < camera.position.y && py > camera.position.y - HEIGHT) {
+          px = t.x; py = t.y; pz = t.z;
+        }
+      }
+      if (Number.isNaN(r.rx)) {
+        r.rx = px; r.ry = t.yaw;
+        r.root.position.set(px, py - EYE, pz);
+      } else {
+        // Smooth-correct toward the (possibly extrapolated) true pose when
+        // a frame arrives — no snapping: normal blend is gentle, but a
+        // larger position error (late/distant frame) corrects faster.
+        const ey = py - EYE - r.root.position.y;
+        const err = Math.hypot(px - r.rx, pz - r.root.position.z, ey);
+        const k = 1 - Math.exp((err > 4 ? -16 : -8) * dt);
+        r.rx += (px - r.rx) * k;
+        const rz = r.root.position.z;
+        r.root.position.set(r.rx, r.root.position.y + ey * k, rz + (pz - rz) * k);
+        let dy = t.yaw - r.ry;
+        while (dy > Math.PI) dy -= 2 * Math.PI;
+        while (dy < -Math.PI) dy += 2 * Math.PI;
+        r.ry += dy * 0.25;
+        r.root.rotation.y = r.ry;
+      }
+    }
+  };
+
+  // ---- Mobs --------------------------------------------------------------
+  // The WorldLive object simulates mobs; the client only ever receives full
+  // snapshots ({type:"mobs",mobs:[...]}) and lerps toward them, so no mob
+  // motion here can desync authority. Bodies live in VOXEL_GROUP like the
+  // avatars — the render-group rule that keeps terrain occluding them.
+  const MOB_LOOKS = {
+    zombie: { body: "#4f7a3a", head: "#6f9a52", accent: "#31512f", h: 1.85, w: 0.65, d: 0.35 },
+    pig: { body: "#e39aa6", head: "#f0b3bd", accent: "#a96b76", h: 0.75, w: 0.8, d: 1.1, quadruped: true },
+    // Fallback shape for any kind the object spawns later.
+    slime: { body: "#4fae5e", head: "#79c986", accent: "#2f7a3c", h: 0.8, w: 0.9, d: 0.9 },
+  };
+  const mobs = new Map();
+  const ensureMob = (id, kind, hostile) => {
+    let m = mobs.get(id);
+    if (m) return m;
+    const look = MOB_LOOKS[kind] || MOB_LOOKS.slime;
+    const root = new Mesh("mob", scene);
+    root.renderingGroupId = VOXEL_GROUP;
+    const mat = key => {
+      const mm = new StandardMaterial("mob-mat", scene);
+      const col = Color3.FromHexString(look[key]);
+      mm.diffuseColor = col;
+      mm.emissiveColor = col.scale(0.22);
+      return mm;
+    };
+    const box = (w, h, d, x, y, z, key) => {
+      const b = MeshBuilder.CreateBox("mob-part", { width: w, height: h, depth: d }, scene);
+      b.position.set(x, y, z);
+      b.parent = root;
+      b.renderingGroupId = VOXEL_GROUP;
+      b.material = mat(key);
+      return b;
+    };
+    if (look.quadruped) {
+      box(look.w, look.h * 0.6, look.d, 0, look.h * 0.55, 0, "body");           // torso
+      box(look.w * 0.7, look.h * 0.55, look.w * 0.6, 0, look.h * 0.72, look.d * 0.62, "head"); // head forward
+      for (const [sx, sz] of [[-1, 1], [1, 1], [-1, -1], [1, -1]])
+        box(0.22, look.h * 0.5, 0.22, sx * look.w * 0.3, look.h * 0.24, sz * look.d * 0.36, "accent");
+    } else if (kind === "slime") {
+      box(look.w, look.h, look.d, 0, look.h / 2, 0, "body");
+      box(look.w * 0.45, look.h * 0.22, look.d * 0.2, 0, look.h * 0.62, look.d * 0.5, "accent");
+    } else {
+      box(0.42, 0.85, 0.28, 0, 0.43, 0, "accent");                              // legs
+      box(look.w, 0.6, look.d, 0, 1.15, 0, "body");                             // torso
+      box(0.4, 0.36, 0.36, 0, 1.63, 0, "head");                                 // head
+      if (kind === "zombie") {                                                  // arms out, Minecraft-style
+        box(0.2, 0.55, 0.2, -look.w * 0.42, 1.2, look.d * 0.5, "accent");
+        box(0.2, 0.55, 0.2, look.w * 0.42, 1.2, look.d * 0.5, "accent");
+      }
+    }
+    m = { root, kind, hostile, w: look.w, h: look.h, d: look.d,
+      target: null, last: 0, mx: NaN, my: 0, hp: null, hitAt: 0, phase: Math.random() * 6 };
+    mobs.set(id, m);
+    return m;
+  };
+  const advanceMobs = () => {
+    const now = Date.now();
+    const dt = Math.min(0.1, engine.getDeltaTime() / 1000);
+    for (const [id, m] of mobs) {
+      if (now - m.last > 5_000) { // snapshot gap: the object stopped listing it
+        m.root.dispose(false, true);
+        mobs.delete(id);
+        continue;
+      }
+      if (!m.target) continue;
+      const t = m.target;
+      // Snapshots are ~4 Hz; glide between them (the object's own walk is
+      // slower than a player's, so a gentle blend reads as smooth walking).
+      const err = Math.hypot(t.x - m.mx, t.z - m.root.position.z, t.y - m.root.position.y);
+      const k = err > 3 ? 1 - Math.exp(-14 * dt) : 1 - Math.exp(-7 * dt);
+      if (Number.isNaN(m.mx)) {
+        m.mx = t.x; m.my = t.yaw;
+        m.root.position.set(t.x, t.y, t.z);
+      } else {
+        m.root.position.set(
+          m.mx + (t.x - m.mx) * k,
+          m.root.position.y + (t.y - m.root.position.y) * k,
+          m.root.position.z + (t.z - m.root.position.z) * k
+        );
+        m.mx += (t.x - m.mx) * k;
+        let dy = t.yaw - m.my;
+        while (dy > Math.PI) dy -= 2 * Math.PI;
+        while (dy < -Math.PI) dy += 2 * Math.PI;
+        m.my += dy * 0.3;
+        m.root.rotation.y = m.my;
+      }
+      // Walking bob: quadrupeds and humanoids get a subtle leg/limb swing
+      // keyed to travelled distance so idle mobs stand still.
+      const speed = Math.hypot(t.x - m.root.position.x, t.z - m.root.position.z);
+      m.phase += dt * (1.5 + speed * 3);
+      const swing = Math.min(0.45, speed * 0.35) * Math.sin(m.phase * 3);
+      for (const child of m.root.getChildren()) {
+        if (child.name === "mob-part" && child.position.y < m.h * 0.55) child.rotation.x = swing;
+      }
+      // Recent hit: brief brightening so an attack reads without a health bar.
+      const flash = Math.max(0, 0.35 - (now - m.hitAt) / 400);
+      if (m.flashWas !== flash) {
+        m.flashWas = flash;
+        for (const child of m.root.getChildren()) {
+          if (child.material && child.name === "mob-part") child.material.emissiveColor = child.material.diffuseColor.scale(0.22 + flash * 1.6);
+        }
+      }
     }
   };
 
@@ -472,6 +666,7 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     tick();
     applyDayNight();
     advanceRemotes();
+    advanceMobs();
     // Chunk streaming: when the player crosses a 16-block cell, move the
     // world thread's generator focus so vlox re-rings its active sectors
     // (new chunks generate ahead, far ones drop out).
@@ -539,16 +734,75 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
 
     /** Update live settings (sensitivity/fov/render distance/speed). */
     setSettings(next) { applySettings(next); },
-    /** Place or update a remote player's avatar from a presence pose frame. */
-    setRemote(name, x, y, z, yaw, appearance) {
+    /**
+     * Place or update a remote player's avatar from a presence pose frame.
+     * vx/vy/vz (optional, blocks/sec) let advanceRemotes dead-reckon the
+     * avatar along its velocity between pose frames.
+     */
+    setRemote(name, x, y, z, yaw, appearance, vx, vy, vz) {
       const r = ensureRemote(name, appearance);
       applyLook(r, appearance);
       r.target = { x, y, z, yaw };
+      const vel = v => (typeof v === "number" && Number.isFinite(v) ? clamp(v, -30, 30) : 0);
+      r.vx = vel(vx); r.vy = vel(vy); r.vz = vel(vz);
       r.last = Date.now();
     },
     removeRemote(name) {
       const r = remotes.get(name);
       if (r) { r.root.dispose(false, true); remotes.delete(name); }
+    },
+
+    /** One entry from a WorldLive mob snapshot (y = feet on the surface). */
+    setMob(id, kind, x, y, z, yaw, hostile, hp) {
+      const m = ensureMob(id, kind, hostile === true);
+      if (typeof hp === "number" && m.hp !== null && hp < m.hp) m.hitAt = Date.now();
+      if (typeof hp === "number") m.hp = hp;
+      m.target = { x, y, z, yaw };
+      m.last = Date.now();
+    },
+    removeMob(id) {
+      const m = mobs.get(id);
+      if (m) { m.root.dispose(false, true); mobs.delete(id); }
+    },
+    /**
+     * The mob the crosshair is over, within melee reach (or null). A ray/AABB
+     * test against the snapshot bodies — picking is presentation; the object
+     * re-checks distance and only accepts weapon/tool items.
+     */
+    pickMob() {
+      const dir = camera.getForwardRay().direction;
+      const ox = camera.position.x, oy = camera.position.y, oz = camera.position.z;
+      let best = null, bestT = 6;
+      for (const [id, m] of mobs) {
+        const p = m.root.position;
+        const minX = p.x - m.w / 2, maxX = p.x + m.w / 2;
+        const minY = p.y, maxY = p.y + m.h;
+        const minZ = p.z - m.d / 2, maxZ = p.z + m.d / 2;
+        let t0 = 0, t1 = bestT;
+        let ok = true;
+        for (const [o, d, lo, hi] of [[ox, dir.x, minX, maxX], [oy, dir.y, minY, maxY], [oz, dir.z, minZ, maxZ]]) {
+          if (Math.abs(d) < 1e-8) { if (o < lo || o > hi) { ok = false; break; } continue; }
+          let a = (lo - o) / d, b = (hi - o) / d;
+          if (a > b) { const s = a; a = b; b = s; }
+          t0 = Math.max(t0, a); t1 = Math.min(t1, b);
+          if (t0 > t1) { ok = false; break; }
+        }
+        if (ok && t0 >= 0 && t0 < bestT) { bestT = t0; best = { id, kind: m.kind, hostile: m.hostile, distance: t0 }; }
+      }
+      return best;
+    },
+
+    /** Teleport the local body (respawn). y is eye height, like `pose`. */
+    setPose(state) {
+      if (!state) return false;
+      const x = Number(state.x), y = Number(state.y), z = Number(state.z);
+      if (![x, y, z].every(Number.isFinite)) return false;
+      camera.position.set(x, y, z);
+      yaw = Number(state.yaw) || 0;
+      pitch = Math.max(-1.52, Math.min(1.52, Number(state.pitch) || 0));
+      camera.rotation.y = yaw;
+      camera.rotation.x = pitch;
+      return true;
     },
 
     /** Release input grabs when leaving the game screen. */
@@ -567,6 +821,12 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     /** Re-fit the engine after the game overlay is un-hidden. */
     resize() {
       engine.resize();
+    },
+
+    /** Park (or release) the local body — used for the death state. */
+    setFrozen(v) {
+      frozen = !!v;
+      if (frozen) { keys.clear(); vy = 0; }
     },
 
     /** True when a block at (cx,cy,cz) would intersect the player body. */
