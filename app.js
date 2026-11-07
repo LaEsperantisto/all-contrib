@@ -684,7 +684,7 @@ async function boot(){
       return;
     }
     try {
-      const { DVE_REV } = await import("./dve/src/rev.js");
+      const { DVE_REV } = await import("./dve/dist/rev.js");
       dveMod = await import(`./dve/dist/dve-view.js?h=${DVE_REV["dve-view.js"]}`);
       await refreshRegistry();      // textures come from the block registry
       await loadWorldAll();         // player edits made before this session

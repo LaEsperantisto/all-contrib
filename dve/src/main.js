@@ -4,7 +4,7 @@
 // this module paints/erases voxels from server-authoritative edits and drives
 // the first-person camera (look + WASD + gravity/jump), nothing else.
 import { Engine, Scene, FreeCamera, Vector3, Color4, Matrix, MeshBuilder, Mesh, StandardMaterial, Color3, DynamicTexture, GlowLayer } from "@babylonjs/core";
-import { DVE_REV } from "./rev.js";
+import { DVE_REV } from "../dist/rev.js";
 import InitDVEBRClassic from "@divinevoxel/vlox-babylon/Init/Classic/InitDVEBRClassic";
 import { StartRenderer } from "@divinevoxel/vlox/Init/StartRenderer";
 import { VoxelBuildSpace } from "@divinevoxel/vlox/Builder/VoxelBuildSpace";

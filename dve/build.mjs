@@ -14,6 +14,13 @@ const shared = {
   logLevel: "warning",
 };
 
+// main.js imports the manifest, so seed a placeholder before the first pass if
+// none is committed; the real hashes are written afterwards (rebuild once more
+// to inline them into the view bundle).
+import { existsSync } from "node:fs";
+if (!existsSync("dist/rev.js"))
+  writeFileSync("dist/rev.js", 'export const DVE_REV = {"dve-view.js":"0","world.worker.js":"0","generator.worker.js":"0","mesher.worker.js":"0"};\n');
+
 await build({ ...shared, entryPoints: ["src/main.js"], outfile: "dist/dve-view.js" });
 await build({ ...shared, entryPoints: ["src/world.worker.js"], outfile: "dist/world.worker.js" });
 await build({ ...shared, entryPoints: ["src/generator.worker.js"], outfile: "dist/generator.worker.js" });
@@ -29,6 +36,6 @@ const rev = {
   "generator.worker.js": hash("generator.worker.js"),
   "mesher.worker.js": hash("mesher.worker.js"),
 };
-writeFileSync("src/rev.js", `export const DVE_REV = ${JSON.stringify(rev)};\n`);
+writeFileSync("dist/rev.js", `export const DVE_REV = ${JSON.stringify(rev)};\n`);
 
 console.log("dve view bundled → dist/", rev);
