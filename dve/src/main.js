@@ -720,7 +720,11 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     const now = Date.now();
     const dt = Math.min(0.1, engine.getDeltaTime() / 1000);
     for (const [name, r] of remotes) {
-      if (now - r.last > 60_000) { // stale: player left or went silent
+      // Stale: player left or went silent. The server's own staleness window
+      // is 100 s, sized for a hidden, timer-throttled tab (Chrome wakes it
+      // once a minute); the client must not prune a remote the server still
+      // considers present, or the avatar flickers back every wake-up.
+      if (now - r.last > 150_000) {
         r.root.dispose(false, true);
         remotes.delete(name);
         continue;
