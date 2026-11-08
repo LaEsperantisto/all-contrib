@@ -15,6 +15,7 @@ import { Sector } from "@divinevoxel/vlox/World/Sector";
 import { WorldSimulationTasks } from "@divinevoxel/vlox/WorldSimulation/Internal/WorldSimulationTasks.js";
 import { WorldSimulationTools } from "@divinevoxel/vlox/WorldSimulation/Internal/WorldSimulationTools.js";
 import { SnapShots } from "@divinevoxel/vlox/World/SnapShot/SnapShots";
+import { SectionSnapShot } from "@divinevoxel/vlox/World/SnapShot/SectionSnapShot";
 import { VoxelLUT } from "@divinevoxel/vlox/Voxels/Data/VoxelLUT";
 import { VoxelTagsRegister } from "@divinevoxel/vlox/Voxels/Data/VoxelTagsRegister";
 import { SectionStateDefaultTicks } from "@divinevoxel/vlox/World/Section/SectionState.js";
@@ -514,8 +515,8 @@ Threads.registerTask("paint-direct", async ([loc, raw, id]) => {
 // Diagnostics: capture worker throws (a throw inside tick() would abort the
 // per-tick pipeline iteration silently).
 const werrs = [];
-self.addEventListener("error", e => { if (werrs.length < 8) werrs.push(String(e.message || e).slice(0, 160)); });
-self.addEventListener("unhandledrejection", e => { if (werrs.length < 8) werrs.push("rej:" + String(e.reason && e.reason.message || e.reason).slice(0, 160)); });
+self.addEventListener("error", e => { if (werrs.length < 8) werrs.push(String(e.message || e).slice(0, 160) + " @ " + String(e.filename || "").split("/").pop() + ":" + e.lineno + ":" + e.colno); });
+self.addEventListener("unhandledrejection", e => { if (werrs.length < 8) werrs.push("rej:" + String(e.reason && e.reason.message || e.reason).slice(0, 160) + "\n" + String(e.reason && e.reason.stack || "").split("\n").slice(0, 6).join("\n").slice(0, 700)); });
 
 // Diagnostics: log every pipeline queue dispatch (task id + sector).
 const dispatchLog = [];
@@ -819,6 +820,27 @@ async function driveSlabPipeline() {
 // Diagnostics: how many sections were empty at snapshot-transfer time
 // (empty = mesher will skip; a non-empty skip would indicate a mesher bug).
 let snapLog = [], snapTotal = 0, snapEmpty = 0;
+{
+  // A sector checked out for a thread transfer mid-snapshot detaches its
+  // buffer, and the per-cell copy throws on a detached source (seen live:
+  // teleport storms + heavy edits repro it). vlox unlocks the box but the
+  // rejection escapes unhandled and the region silently stops re-meshing.
+  // Make the copy cell-tolerant instead: cells copied so far stay fresh,
+  // the rest keep their previous contents (each cell's `_used` flag only
+  // flips on a complete copy, so the snapshot never claims data it lacks),
+  // and the column is re-bumped so the next round recopies everything.
+  const oss = SectionSnapShot.prototype.storeSnapShot;
+  SectionSnapShot.prototype.storeSnapShot = function () {
+    try {
+      oss.apply(this, arguments);
+    } catch (e) {
+      if (!/detached|out-of-bounds/.test(String(e && e.message))) throw e;
+      const [, x, y, z] = this.location;
+      pendingRemesh.add(x + "," + y + "," + z);
+      if (werrs.length < 24) werrs.push("snap-stale:" + [x, y, z].join(","));
+    }
+  };
+}
 {
   const ocs = SnapShots.createSnapShot;
   SnapShots.createSnapShot = function (dim, x, y, z) {
