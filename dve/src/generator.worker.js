@@ -128,3 +128,12 @@ Threads.registerTask("note-edit", (d) => {
   g.edits.set(`${d.x},${d.y},${d.z}`, d.block_id);
   return [true];
 });
+
+// The admin re-ran the edit table: throw this mirror away and re-read it, so
+// cells that stream in later are built from the same snapshot the loaded chunks
+// were just rebuilt from. Notes that land mid-fetch are replayed by loadEdits.
+Threads.registerTask("reload-edits", async () => {
+  const g = ACWorldGen.instance;
+  await g.loadEdits();
+  return [g.edits ? g.edits.size : 0];
+});

@@ -831,6 +831,18 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     },
 
     /**
+     * Re-read the authoritative edit snapshot inside the generator thread.
+     * Called after a world resync: chunks that activate later must be built
+     * from the same truth the loaded chunks were rebuilt from.
+     */
+    reloadGeneratorEdits() {
+      try {
+        const gen = DVER.threads.generators.getThreads()[0];
+        if (gen) gen.runTaskAsync("reload-edits");
+      } catch { /* a generator restart re-fetches from the API anyway */ }
+    },
+
+    /**
      * Cast a ray from a screen point into the voxel world.
      * Returns { position, normalPosition } in 3D coords, or null.
      * Crosshair picking: app passes the canvas centre.
@@ -971,6 +983,11 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
 
     /** A scripted block's light column. `colour` is #rrggbb, or null to remove. */
     setBeam(x, y, z, colour) { setBeam(x, y, z, colour); },
+
+    /** Every column this engine is drawing right now, as [x,y,z]. Asked when a
+     *  resync needs to know what to clear — the caller's own list of beams can
+     *  itself be out of date, so only the renderer knows what is on screen. */
+    beamCells() { return [...beams.keys()].map(k => k.split(",").map(Number)); },
 
     /** Teleport the local body (respawn). y is eye height, like `pose`. */
     setPose(state) {

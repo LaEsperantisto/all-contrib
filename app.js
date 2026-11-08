@@ -159,6 +159,7 @@ function renderAdminTools(){
   $("add-item-form").hidden=!isAdmin();
   $("add-item-note").hidden=!isAdmin();
   $("clear-inventory-button").hidden=!isAdmin();
+  $("pause-resync").hidden=!isAdmin();
 }
 // Health bar: ten hearts, half hearts allowed (health is 0..20 server units).
 function renderHealth(){
@@ -911,6 +912,7 @@ $("pause-mainmenu").addEventListener("click",()=>{
 });
 $("pause-inventory").addEventListener("click",openInventoryDialog);
 $("pause-studio").addEventListener("click",()=>$("studio-dialog").showModal());
+$("pause-resync").addEventListener("click",resyncWorld);
 $("hud-menu").addEventListener("click",openPause);
 // Look changes the block/item artwork, which the world compiles when it is
 // created — so it applies on the next join, not mid-world.
@@ -1022,6 +1024,47 @@ async function loadWorldAll(){
     setConnection(true);
   }catch{setConnection(false);}
 }
+// Rebuild this client's world from the server's snapshot. The live socket can
+// leave us holding cells the database never had (a frame for a block that was
+// deleted from the registry before it landed, a half-received batch), and no
+// frame can take those away — only the snapshot says "nothing here". So: drop
+// the overlay, re-read it, then paint every cell we believed in that the
+// snapshot does not mention back to plain terrain.
+async function rebuildWorldFromSnapshot(){
+  if(!dveMod)return;
+  const known=new Map(worldEdits);
+  worldEdits.clear();
+  await loadWorldAll();
+  for(const key of known.keys()){
+    if(worldEdits.has(key))continue;
+    const [x,y,z]=key.split(",").map(Number);
+    if(dveView)dveView.applyEdit(x,y,z,dveMod.baseBlock(x,y,z));
+  }
+  // Ask the engine which columns it is drawing, not which ones we last read. A
+  // column whose removal frame never arrived is absent from worldBeams while it
+  // is still glowing on screen; a repair that trusted our own list would leave
+  // it there forever.
+  for(const [x,y,z] of (dveView?dveView.beamCells():[]))
+    if(!worldBeams.some(n=>n.x===x&&n.y===y&&n.z===z))dveView.setBeam(x,y,z,null);
+  // The generator paints cells that stream in later, so its edit mirror has to
+  // come from the snapshot too.
+  if(dveView&&dveView.reloadGeneratorEdits)dveView.reloadGeneratorEdits();
+}
+// Admin repair switch: ask the Worker to re-run the edit table (prune derived
+// rows that lost their cell, replay every surviving cell, and send a `resync`
+// frame that makes each client call rebuildWorldFromSnapshot).
+async function resyncWorld(){
+  if(!isAdmin()){toast("Only the admin account can resync the world.",true);return;}
+  const button=$("pause-resync");
+  button.disabled=true;
+  try{
+    const r=await api("/api/world/resync",{method:"POST",body:"{}"});
+    const stale=r&&r.stale?r.stale:{log:0,state:0,beams:0,inv:0};
+    const cleared=(Number(stale.log)||0)+(Number(stale.state)||0)+(Number(stale.beams)||0)+(Number(stale.inv)||0);
+    toast(`World resynced: ${r.replayed} cells replayed, ${cleared} stale rows cleared.`);
+  }catch(err){toast(err.message,true);}
+  button.disabled=false;
+}
 function connectLive(){
   ws=new WebSocket(API_BASE.replace(/^http/,"ws")+"/api/world/live");
   ws.onopen=()=>{wsRetry=0;setConnection(true);sendPresence(true);};
@@ -1040,10 +1083,16 @@ function connectLive(){
     else if(m.type==="down"&&dveView)dveView.setDown(m.name,true);
     else if(m.type==="up"&&dveView)dveView.setDown(m.name,false);
     else if(m.type==="beam"&&dveView)dveView.setBeam(m.x,m.y,m.z,m.colour||null);
+    // A block script moved this player. Keep the look, replace the body; the
+    // server has already written the position, so the next presence frame just
+    // confirms where the client now stands.
+    else if(m.type==="move"&&dveView&&m.name===username)dveView.setPose({x:m.x,y:m.y,z:m.z,yaw:dveView.pose.yaw,pitch:dveView.pose.pitch});
     else if(m.type==="health")applyHealth(m);
     else if(m.type==="hurt")applyHealth(m);
     else if(m.type==="died")applyDeath(m);
     else if(m.type==="respawn")applyRespawn(m);
+    // The admin re-ran the edit table: rebuild from the snapshot.
+    else if(m.type==="resync")rebuildWorldFromSnapshot();
   }catch{/* ignore non-JSON frames */}};
   ws.onclose=()=>{setConnection(false);setTimeout(connectLive,Math.min(15000,500*2**wsRetry++));};
   ws.onerror=()=>{try{ws.close();}catch{/* already closed */}};
@@ -1161,10 +1210,14 @@ async function interactUnderCrosshair(){
     return;
   }
   for(const t of (r.toasts||[]))toast(t);
+  if(r.items)await refreshInventory();
   if(r.menu&&r.menu.length){
     interactTarget={x,y,z};
     $("interact-title").textContent=r.title||String(r.name||"Block");
     $("interact-options").innerHTML=r.menu.map(o=>`<button class="button button-outline full" type="button" data-choice="${escapeAttr(o.key)}">${escapeHtml(o.label)}</button>`).join("");
+    // A menu is aimed with a cursor, not with the crosshair: hand the mouse
+    // back before opening it. Closing any dialog grabs it again.
+    if(document.pointerLockElement)document.exitPointerLock();
     $("interact-dialog").showModal();
   }
 }
@@ -1177,6 +1230,9 @@ $("interact-options").addEventListener("click",async e=>{
     const r=await api("/api/block/interact",{method:"POST",body:JSON.stringify({x,y,z,key:b.dataset.choice})});
     if(r&&r.reason==="script-error")toast(`That block's script is broken: ${r.error||"it failed to run"}.`,true);
     for(const t of (r&&r.toasts)||[])toast(t);
+    // The script may have taken items out of, or put them into, this player's
+    // bag — the toast says so, but the numbers come from the server.
+    if(r&&r.items)await refreshInventory();
   }catch(err){toast(err.message,true);}
 });
 
@@ -1201,7 +1257,13 @@ async function worldAction(button,x,y,z){
   try{
     if(button===2){
       const data=await api("/api/world/break",{method:"POST",body:JSON.stringify({x,y,z})});
-      toast(`Broke ${data.dropped} at ${x} ${y} ${z} — +1 item.`);
+      // A scripted block can speak as it dies, and its store comes out with it:
+      // the toast says what actually landed in the bag, not a guess.
+      const bits=[`Broke ${data.dropped} at ${x} ${y} ${z}`];
+      const got=[`1 ${data.dropped}`,...(data.contents||[]).map(c=>`${c.qty} ${c.item}`)].join(", ");
+      bits.push(`+${got}`);
+      const said=((data.toasts||[]).join(" ")).trim();
+      toast(said?`${bits.join(" — ")} — ${said}`:`${bits.join(" — ")}.`);
     }else{
       if(!selectedItem){toast("Pick an item from your inventory or hotbar first.",true);return;}
       await api("/api/world/place",{method:"POST",body:JSON.stringify({x,y,z,item_id:selectedItem})});
