@@ -69,6 +69,13 @@
 .hud-buttons{position:fixed;top:14px;right:14px;display:flex;gap:7px;z-index:62;flex-wrap:wrap;max-width:40vw}
 .hud-buttons .button small{opacity:.55;margin-left:5px;font-family:"DM Mono",monospace}
 #hotbar{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);display:flex;gap:6px;z-index:62}
+/* The selected item, Minecraft-style, bottom-right: its image + name. It
+   sits ABOVE the hotbar row (which lives at bottom:18px and is 52px tall)
+   so it can never cover the slots. */
+.hud-held{position:fixed;right:16px;bottom:82px;display:flex;align-items:center;gap:9px;font-family:"DM Mono",monospace;font-size:11px;color:var(--ink);background:var(--paper2);border:2px solid var(--ink);border-radius:9px 7px 10px 7px;padding:8px 12px;box-shadow:2px 2px 0 #2e251966;z-index:62;pointer-events:none}
+.hud-held-icon{display:grid;place-items:center;width:44px;height:44px}
+.hud-held-icon img{width:44px;height:44px;image-rendering:pixelated}
+.hud-held-swatch{width:34px;height:34px;border:2px solid var(--ink);border-radius:8px}
 .hotbar-slot{position:relative;width:52px;height:52px;border:2px solid var(--ink);border-radius:10px 8px 11px 8px;background:var(--paper2);display:grid;place-items:center;cursor:pointer;box-shadow:3px 3px 0 #2e251966}
 .hotbar-slot .swatch{width:26px;height:26px;border-radius:6px 5px 7px 5px;display:block}
 .hotbar-key{position:absolute;top:3px;left:6px;font-family:"DM Mono",monospace;font-size:9px;color:var(--ink2)}
@@ -85,6 +92,13 @@
 .pause-modal{width:min(380px,92vw)}
 .pause-menu{display:flex;flex-direction:column;gap:9px;margin:4px 0 0}
 .pause-menu .button{justify-content:center;gap:8px}
+.time-panel{display:flex;flex-direction:column;gap:8px;margin:2px 0;padding:10px 12px;border:2px solid var(--ink);border-radius:10px 8px 11px 9px;background:var(--paper2)}
+.time-head{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.time-readout{font:11px 'DM Mono',monospace;color:var(--ink)}
+.time-panel input[type=range]{width:100%;accent-color:var(--accent)}
+.time-row{display:flex;gap:7px}
+.time-row .button{flex:1;justify-content:center;padding:6px 8px;font-size:12px}
+#admin-resync{margin-top:12px;justify-content:center}
 #pause-server-chip,#pause-account-chip{text-align:center;color:var(--ink2);font:10px "DM Mono",monospace;letter-spacing:.07em;text-transform:uppercase}
 
 /* Wide dialogs (settings, inventory, studio) */
@@ -96,6 +110,14 @@
 .settings-grid select,.settings-grid input[type=range]{width:100%}
 .settings-grid output{font-family:"DM Mono",monospace;color:var(--ink);text-transform:none;font-size:12px}
 @media(max-width:700px){.settings-grid{grid-template-columns:1fr}}
+
+/* The main menu's server picker: choose the world to join, or make one. */
+.menu-field{display:grid;gap:6px;margin:14px 0 2px;text-align:left;font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink2)}
+.menu-field select{width:100%}
+.button-row{display:flex;gap:8px}
+.button-row .button{flex:1}
+.create-field{display:grid;gap:7px;margin:14px 0;text-align:left;font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink2)}
+.create-field input,.create-field select{width:100%}
 
 /* My blocks manager */
 .my-blocks-panel{margin-top:4px}

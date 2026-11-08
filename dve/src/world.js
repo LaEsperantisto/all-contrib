@@ -86,14 +86,18 @@ export function baseBlock(x, y, z) {
   if (y === 0) return "builtin:bedrock";
   const h = heightAt(x, z);
   if (y > h) {
-    if (hasTree(x, z) && y <= h + 4) return "builtin:wood"; // trunk
+    if (hasTree(x, z) && y <= h + 5) return "builtin:wood"; // trunk
+    // The crown sits on top of the trunk: the point that used to be empty
+    // directly above the trunk is now two leaves of crown, one level higher
+    // than the old canopy top.
+    if (hasTree(x, z) && (y === h + 6 || y === h + 7)) return "builtin:leaves";
     for (let dx = -2; dx <= 2; dx++) {
       for (let dz = -2; dz <= 2; dz++) {
         if (dx === 0 && dz === 0) continue;
         if (Math.abs(dx) + Math.abs(dz) > 2) continue;
         if (!hasTree(x + dx, z + dz)) continue;
         const h2 = heightAt(x + dx, z + dz);
-        if (y >= h2 + 3 && y <= h2 + 5) return "builtin:leaves";
+        if (y >= h2 + 4 && y <= h2 + 6) return "builtin:leaves";
       }
     }
     return "air";

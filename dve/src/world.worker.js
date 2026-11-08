@@ -36,10 +36,20 @@ import { BuildTagAndPaletteData } from "@divinevoxel/vlox/Voxels/Functions/Build
 const pendingRemesh = new Set();
 function bumpSection(dim, x, y, z) {
   try {
-    const sec = WorldRegister.sections.get(dim, x, y, z);
+    // `WorldRegister.sectors` is the sector lookup — `sections` does not exist.
+    // A sector owns 3x3x3 sections; the displayDirty tick lives on the Section,
+    // and `getSection` takes world coordinates (it derives the sector-relative
+    // index itself).
+    const sector = WorldRegister.sectors.get(dim, x, y, z);
+    if (!sector || sector.isCheckedOut()) return false;
+    const sec = sector.getSection(x, y, z);
     if (!sec) return false;
-    sec.incrementTick(SectionStateDefaultTicks.displayDirty);
-    return true;
+    const tick = SectionStateDefaultTicks.displayDirty;
+    const before = sec.getTick(tick);
+    sec.incrementTick(tick);
+    // While the sector's buffer is detached, an indexed write into `tickArray`
+    // is a silent no-op, so only claim success when the bump actually landed.
+    return sec.getTick(tick) !== before;
   } catch {
     return false; // buffers detached while the sector is checked out
   }
@@ -58,6 +68,16 @@ function queueRemesh(x, y, z) {
   if (z === sz + b.z - 1) touched.push([sx, sy, sz + b.z]);
   for (const t of touched) if (!bumpSection(0, t[0], t[1], t[2])) pendingRemesh.add(t.join(","));
   if (pendingRemesh.size > 512) pendingRemesh.delete(pendingRemesh.values().next().value);
+  // Lighting changes with the terrain too: a placed lamp starts emitting, a
+  // placed wall blocks, a dug cell opens a path. Queue the touched sections and
+  // their six neighbours so the light field settles across section borders (the
+  // mesher is re-baked by the same displayDirty bump above).
+  for (const t of touched) {
+    lightQueue.add(t.join(","));
+    for (const [dx, dy, dz] of [[b.x, 0, 0], [-b.x, 0, 0], [0, b.y, 0], [0, -b.y, 0], [0, 0, b.z], [0, 0, -b.z]]) {
+      lightQueue.add((t[0] + dx) + "," + (t[1] + dy) + "," + (t[2] + dz));
+    }
+  }
 }
 setInterval(() => {
   if (!pendingRemesh.size) return;
@@ -66,6 +86,375 @@ setInterval(() => {
     if (bumpSection(0, x, y, z)) pendingRemesh.delete(key);
   }
 }, 500);
+
+// ---- Voxel light -------------------------------------------------------------
+// vlox shades every face from a per-voxel light grid that lives inside each
+// section (`Section.light`: four packed 4-bit channels — sun, R, G, B). The
+// mesher reads it and the voxel shader multiplies the texture by it, with
+// baseLevel 0.2 as the floor. We never run vlox's own propagation stages (they
+// are flag-driven and would stall the streaming pipeline), so the grid was
+// always empty and the whole world rendered at that floor: flat and dark.
+//
+// Fill the grid here instead, in the thread that owns the voxel data:
+//   sky  — daylight enters from the top of the loaded column and falls 2 per
+//          block (vlox's own SunFallOffValue), which is what makes a cave
+//          mouth bright and its back dark;
+//   RGB  — block light spreads 1 per block from every block whose registry
+//          `light` value is above zero, so a placed glowstone lights the room
+//          around it and a mined-out corridor stays lit near the lamp.
+// Light only travels through cells that are not full cubes: air, and blocks the
+// registry calls transparent. Main sends that table once per join (a block
+// published in the Studio gets real light the moment it is placed).
+const lightLevel = new Map(); // true voxel id -> emitted light 0..15
+const lightThru = new Set();  // true voxel id -> light passes through
+let SUNK = 2;   // vlox: sun falls off twice as fast as block light
+const litBorder = new Map();  // section key -> checksum of its border values
+const seenSections = new Set(); // section keys the pass has filled at least once
+const lightQueue = new Set(); // section keys that need (re)computing
+let lightReady = false;
+
+Threads.registerTask("light-tables", rows => {
+  lightLevel.clear();
+  lightThru.clear();
+  for (const [name, level, thru] of rows) {
+    let tid = 0;
+    try { tid = VoxelLUT.voxelIds.getNumberId(name); } catch { /* palette mid-sync */ }
+    if (!tid || tid < 0) continue;
+    if (level > 0) lightLevel.set(tid, Math.min(15, level));
+    if (thru) lightThru.add(tid);
+  }
+  lightReady = true;
+  litBorder.clear();
+  seenSections.clear();
+  lightQueue.clear();
+  return [lightLevel.size, lightThru.size];
+});
+
+// Air and unknown ids let light through: only a registered full cube stops it.
+const thruId = tid => (tid === 0 ? true : lightThru.has(tid));
+
+// The grid layout comes from vlox's own space tables, read when a section is
+// lit (they are configured with the world settings, not at module load). The
+// cell order is vlox's YXZ form — z in the low bits, x above it, y on top —
+// identical to `GetYXZOrderArrayIndex` in `Math/WorldIndexing.js`, which is how
+// every cursor and the mesher index a section's own arrays.
+let sSky = null, sRgb = null, sThru = null, sQueue = null, sVol = 0;
+// Light is filled inside the world worker's existing sweep loop (the same 500 ms
+// apply() that runs the streaming gates), never on its own timer: a section that
+// has never been lit is filled in place, up to a per-round budget, and a section
+// whose border checksum changed hands its six neighbours another pass the next
+// round. That keeps lighting and remeshing in step with streaming instead of
+// re-baking the world out from under it.
+let lpCalls = 0, lpDone = 0, lpErr = "";
+let lpForce = false;   // set during light-fill so lightSection logs its seed census
+const lpLog = [];   // one entry per distinct early-exit, for the state diagnostic
+function dims() {
+  const s = WorldSpaces.section;
+  return {
+    x: 1 << s.power2Axes.x, y: 1 << s.power2Axes.y, z: 1 << s.power2Axes.z,
+    v: s.volumne, pz: s.power2Axes.z, pxz: s.xzPower,
+    // The ceiling a section may treat as open sky is the world's MaxY, on
+    // WorldBounds (WorldSpaces.world) — not section.bounds, which is 16.
+    yHeight: WorldSpaces.world.bounds.MaxY,
+  };
+}
+// Section-local cell -> slot in that section's ids/light arrays.
+const slot = (D, x, y, z) => z | (x << D.pz) | (y << D.pxz);
+function scratch(n) {
+  if (sVol === n) return;
+  sVol = n;
+  sSky = new Uint8Array(n);
+  sRgb = new Uint8Array(n);
+  sThru = new Uint8Array(n);
+  sQueue = new Int32Array(n * 4);
+}
+
+function sectionAt(x, y, z) {
+  // `WorldRegister.sectors` is the sector lookup (there is no section registry);
+  // `getSection` derives the sector-relative index from world coordinates.
+  try {
+    const sector = WorldRegister.sectors.get(0, x, y, z);
+    if (!sector) return null;
+    return sector.getSection(x, y, z) ?? null;
+  } catch {
+    return null; // sector mid-transfer: its buffer is detached
+  }
+}
+
+/** Fill one section's light grid. Returns false if its buffers are detached
+ *  (the sector is checked out for a thread transfer) so the caller re-queues. */
+function lightSection(sec) {
+  const ids = sec.ids, light = sec.light;
+  if (!ids || !light) return false;
+  const [ox, oy, oz] = sec.position;
+  let D, key, above, aboveKey;
+  try {
+    D = dims();
+    // Sky flows top-down: an unlit section above would report a border of 0 and
+    // wrongly cap every column here (zero converging to zero is otherwise the
+    // fixed point of the checksum wave). Defer until the load above us is lit;
+    // lightPass re-queues a false return, so the chain resolves from the top.
+    key = ox + "," + oy + "," + oz;
+    above = sectionAt(ox, oy + D.y, oz);
+    aboveKey = ox + "," + (oy + D.y) + "," + oz;
+  } catch (e) { lpErr = "head:" + String(e && e.message || e).slice(0, 80); return false; }
+  if (above && oy + D.y < D.yHeight && !litBorder.has(aboveKey)) {
+    if (!lpLog.includes("defer")) lpLog.push("defer");
+    return false;
+  }
+  if (lpForce) lpLog.push("ph-A:" + key);
+  scratch(D.v);
+  const sky = sSky, rgb = sRgb, thru = sThru, queue = sQueue;
+  const vi = (x, y, z) => slot(D, x, y, z);
+  try {
+    thru.fill(0); sky.fill(0); rgb.fill(0);
+    let head = 0, tail = 0;
+    for (let y = 0; y < D.y; y++) {
+      for (let z = 0; z < D.z; z++) {
+        for (let x = 0; x < D.x; x++) {
+          const k = vi(x, y, z);
+          const tid = VoxelLUT.voxelIdToTrueId[ids[k]] ?? 0;
+          if (!thruId(tid)) continue;      // a full cube blocks light
+          thru[k] = 1;
+          const emit = lightLevel.get(tid);
+          if (emit) {
+            rgb[k] = emit;
+            if (tail + 4 <= queue.length) { queue[tail++] = k; queue[tail++] = x; queue[tail++] = y; queue[tail++] = z; }
+          }
+        }
+      }
+    }
+    // Sky, vlox's own semantics (WorldSun): every cell above the first full
+    // cube in a column carries the sun at the column's value — full 15 where
+    // nothing loads above, otherwise the value the section above reports on
+    // its shared border. The two-per-step falloff is for spreading into
+    // shadow, never down an open column. Only each column's lowest seed joins
+    // the frontier (nothing can beat it higher up), which keeps the queue
+    // bounded. A not-yet-filled upper section reports 0 and the border wave
+    // refills this one once it is lit.
+    let nseed = 0, nzero = 0, ntop = 0;
+    for (let z = 0; z < D.z; z++) {
+      for (let x = 0; x < D.x; x++) {
+        let v = 15;
+        if (above) {
+          try { v = above.light[slot(D, x, 0, z)] & 0xf; } catch { v = 15; }
+        }
+        if (v <= 0) { nzero++; continue; }
+        if (!thru[vi(x, D.y - 1, z)]) { ntop++; continue; }   // this section's column is capped
+        nseed++;
+        let bottom = D.y - 1;
+        for (let y = D.y - 1; y >= 0; y--) {
+          const k = vi(x, y, z);
+          if (!thru[k]) break;
+          sky[k] = v;
+          bottom = y;
+        }
+        if (tail + 4 <= queue.length) { queue[tail++] = vi(x, bottom, z); queue[tail++] = x; queue[tail++] = bottom; queue[tail++] = z; }
+      }
+    }
+    if (lpForce) lpLog.push("seed:" + nseed + " zero:" + nzero + " top:" + ntop + " ab:" + (above ? 1 : 0) + " hy:" + D.yHeight);
+    // Both channels travel the same frontier: each step loses one level for
+    // block light, two for daylight, and never passes a full cube. A cell keeps
+    // the brightest it has seen, so re-running a section only ever strengthens
+    // it, which is what makes the border settling wave converge.
+    let iters = 0;
+    while (tail > head) {
+      if (++iters > 300000) { lpLog.push("front-budget"); break; }
+      const k = queue[head++];
+      const x = queue[head++], y = queue[head++], z = queue[head++];
+      const s0 = sky[k], r0 = rgb[k];
+      const ns = s0 > SUNK ? s0 - SUNK : 0;
+      const nr = r0 > 1 ? r0 - 1 : 0;
+      if (!ns && !nr) continue;
+      for (const [nx, ny, nz] of [[x + 1, y, z], [x - 1, y, z], [x, y + 1, z], [x, y - 1, z], [x, y, z + 1], [x, y, z - 1]]) {
+        if (nx < 0 || ny < 0 || nz < 0 || nx >= D.x || ny >= D.y || nz >= D.z) continue;
+        const j = vi(nx, ny, nz);
+        if (!thru[j]) continue;
+        let moved = false;
+        if (ns > sky[j]) { sky[j] = ns; moved = true; }
+        if (nr > rgb[j]) { rgb[j] = nr; moved = true; }
+        if (moved && tail + 4 <= queue.length) { queue[tail++] = j; queue[tail++] = nx; queue[tail++] = ny; queue[tail++] = nz; }
+      }
+    }
+    lpLog.push("ph-C:" + iters);
+    // Store: sun in the low nibble, white block light in R/G/B (the registry's
+    // `light` value carries no colour, so light stays neutral).
+    for (let k = 0; k < D.v; k++) {
+      light[k] = sky[k] | (rgb[k] << 4) | (rgb[k] << 8) | (rgb[k] << 12);
+    }
+    lpLog.push("store:" + light[vi(0, D.y - 1, 0)] + "," + light[vi(D.x >> 1, D.y - 1, D.z >> 1)]);
+  } catch (e) { lpErr = String(e && e.message || e).slice(0, 80); return false; }   // buffers detached mid-transfer
+  // A border whose values changed has to hand its neighbours another pass, or
+  // light never crosses the section line.
+  let sum = 0;
+  for (let a = 0; a < D.x; a++) {
+    for (let b = 0; b < D.z; b++) {
+      sum = (sum + light[vi(a, 0, b)] + light[vi(a, D.y - 1, b)] + light[vi(a, b, 0)] + light[vi(a, b, D.z - 1)]) | 0;
+    }
+  }
+  if (litBorder.get(key) === sum) return true;
+  litBorder.set(key, sum);
+  for (const [dx, dy, dz] of [[D.x, 0, 0], [-D.x, 0, 0], [0, D.y, 0], [0, -D.y, 0], [0, 0, D.z], [0, 0, -D.z]]) {
+    const n = sectionAt(ox + dx, oy + dy, oz + dz);
+    if (n) lightQueue.add(n.position.join(","));
+  }
+  return true;
+}
+
+/** One pass of the light queue: recompute the queued sections, and re-mesh the
+ *  ones whose lighting changed (the mesher only re-bakes on a displayDirty
+ *  tick, exactly like a player edit). */
+function lightPass(sectors) {
+  lpCalls++;
+  if (!lightReady) return 0;
+  const keys = [...lightQueue];
+  let done = 0;
+  for (const key of keys) {
+    if (done >= 24) { lightQueue.add(key); continue; }   // bound each pass; the rest wait
+    lightQueue.delete(key);
+    const [x, y, z] = key.split(",").map(Number);
+    const sec = sectionAt(x, y, z);
+    if (!sec) { litBorder.delete(key); if (!lpLog.includes("nosec")) lpLog.push("nosec:" + key); continue; }
+    const ok = lightSection(sec);
+    if (!ok) { lightQueue.add(key); if (!lpLog.includes("notrig")) lpLog.push("notrig:" + key + ":" + (sec.ids ? "ids" : "noids")); continue; }
+    seenSections.add(key);
+    const tick = SectionStateDefaultTicks.displayDirty;
+    try {
+      if (sec.getTick(tick) !== undefined) sec.incrementTick(tick);
+    } catch { /* buffer detached; the sector's own path will re-mesh it */ }
+    done++;
+  }
+  lpDone += done;
+  // Every section that has never been lit needs filling, but only a few
+  // sections' worth per round: re-lighting (and so re-meshing) the whole active
+  // world at once starves the streaming pipeline. They are filled here rather
+  // than queued: a section has to be filled once before its border checksum
+  // means anything, and a queue that starts empty has no chance to notice.
+  let budget = 24;
+  let skipped = 0;
+  const fresh = new Set();
+  for (const s of sectors) {
+    if (budget <= 0) break;
+    if (!s.sector || co(s.sector)) { skipped++; continue; }
+    for (const sec of unlitSections(s)) fresh.add(sec);
+  }
+  if (skipped && !lpLog.includes("skip")) lpLog.push("skip:" + skipped + "/" + sectors.length);
+  if (fresh.size && !lpLog.includes("sweep")) lpLog.push("sweep:" + fresh.size + ":" + sectors.length);
+  if (lpLog.length > 64) lpLog.splice(0, lpLog.length - 64);
+  for (const k of fresh) {
+    if (budget <= 0) { lightQueue.add(k); continue; }
+    const [fx, fy, fz] = k.split(",").map(Number);
+    const sec = sectionAt(fx, fy, fz);
+    if (!sec) continue;
+    if (!lightSection(sec)) { lightQueue.add(k); continue; }   // buffers detached: try again next round
+    seenSections.add(k);
+    const tick = SectionStateDefaultTicks.displayDirty;
+    try {
+      if (sec.getTick(tick) !== undefined) sec.incrementTick(tick);
+    } catch { /* buffer detached; the sector's own path will re-mesh it */ }
+    budget--; lpDone++; done++;
+  }
+  return done;
+}
+
+/** The sections of one active sector that have never been lit. A section's
+ *  border checksum can legitimately repeat (an all-air column stays all-air),
+ *  so the queue also has to remember which sections it has touched at all. */
+function unlitSections(s) {
+  const out = [];
+  try {
+    for (const sec of s.sector.sections) {
+      const key = sec.position.join(",");
+      if (!seenSections.has(key)) out.push(key);
+    }
+  } catch { /* sector mid-transfer */ }
+  return out;
+}
+
+// Diagnostics: read the packed light of specific world cells back out, so a
+// live proof can ask about a lamp's neighbours without guessing the grid order
+// on the main thread.
+Threads.registerTask("light-cells", flat => {
+  // Args arrive one-per-element, so a cell list is handed over as a flat run of
+  // coordinates and reassembled here.
+  const cells = [];
+  for (let i = 0; i + 2 < flat.length + 1; i += 3) cells.push([flat[i], flat[i + 1], flat[i + 2]]);
+  return [[...cells.map(([x, y, z]) => {
+    const sec = sectionAt(x, y, z);
+    // A missing section is the finding, not a failure to handle it: say so, or a
+    // probe reads silence as "unlit".
+    if (!sec) return [x, y, z, "no-section"];
+    if (!sec.light) return [x, y, z, "no-light-buffer"];
+    const p = sec.position, D = dims();
+    try {
+      const v = sec.light[slot(D, x - p[0], y - p[1], z - p[2])];
+      return [x, y, z, v & 0xf, (v >> 4) & 0xf, (v >> 8) & 0xf, (v >> 12) & 0xf];
+    } catch (e) { return [x, y, z, "read-failed:" + String(e && e.message || e).slice(0, 24)]; }
+  }), lightPassState()]];
+});
+
+// Diagnostics: how many sections have been lit and how many are still queued.
+const lightPassState = () => [litBorder.size, lightQueue.size, lpCalls, lpDone, lpErr, lightReady, lightLevel.size, lightThru.size, seenSections.size, lpLog.slice(-12)];
+Threads.registerTask("light-state", () => [lightPassState()]);
+// Diagnostics: fill specific sections on demand, so a probe can separate the
+// seeding/order from the streaming sweep.
+Threads.registerTask("light-fill", cells => {
+  lpLog.push("fill-start:" + (cells && cells.length));
+  lpForce = true;
+  let done = 0, nkeys = 0, seen = [];
+  try {
+    const keys = new Set();
+    for (const [x, y, z] of cells) {
+      const sec = sectionAt(x, y, z);
+      if (sec) keys.add(sec.position.join(","));
+      else seen.push(`${x},${y,z}=none`);   // no section here at all: say so
+    }
+    // A fill defers while its section above is unlit, so the forced set has to
+    // include that chain — and fill it top-down, or every pass just defers.
+    const D = dims();
+    for (const key of keys) {
+      const [x, y, z] = key.split(",").map(Number);
+      for (let ay = y + D.y; ay < D.yHeight; ay += D.y) {
+        const a = sectionAt(x, ay, z);
+        if (!a) break;
+        const ak = a.position.join(",");
+        if (keys.has(ak)) break;
+        keys.add(ak);
+      }
+    }
+    const order = [...keys].sort((a, b) => Number(b.split(",")[1]) - Number(a.split(",")[1]));
+    lpLog.push("ch:" + order.length);
+    for (let pass = 0; pass < 2; pass++) {
+      for (const key of order) {
+        const [x, y, z] = key.split(",").map(Number);
+        const sec = sectionAt(x, y, z);
+        if (sec) {
+          const ok = lightSection(sec);
+          lpLog.push("res:" + pass + ":" + key + ":" + (ok ? 1 : 0));
+          if (ok) { seenSections.add(key); done++; }
+        } else if (pass === 0) seen.push(`gone:${key}`);
+      }
+    }
+    nkeys = keys.size;
+  } catch (e) {
+    lpErr = "fill-throw:" + String(e && e.message || e).slice(0, 90);
+    if (e && e.stack) lpLog.push("st:" + String(e.stack).split("\n")[1].trim().slice(0, 70));
+  }
+  lpForce = false;
+  lpLog.push("fill-done:" + done);
+  // The threads layer treats a sync task's return as [payload, transferList],
+  // so the whole payload must sit in ONE outer array element or the reply is
+  // posted with a bogus transfer list and the caller never resolves.
+  return [[[done, nkeys, seen.slice(0, 4)], lightPassState()]];
+});
+Threads.registerTask("light-probe", ([x, y, z]) => {
+  const sec = sectionAt(x, y, z);
+  if (!sec || !sec.light) return [null];
+  const n = dims().v;
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(sec.light[i]);
+  return [[out, Array.from(sec.position), litBorder.size, lightQueue.size, lpCalls, lpDone, lpErr, lightReady, [...lightLevel.keys()].length, [...lightThru].length]];
+});
 
 
 // Server echo paint path. The stock "paint-voxel" task awaits LockSectors,
@@ -386,6 +775,9 @@ async function driveSlabPipeline() {
       for (const f of ["isWorldDecorDone", "isWorldPropagationDone", "isWorldSunDone"])
         try { s.sector.setBitFlag(Sector.FlagIds[f], true); } catch { /* buffer mid-transfer; next pass */ }
     }
+    // Real light: fill/refresh the voxel light grids for the sections that
+    // still need it (new streaming, player edits, borders that changed).
+    try { lightPass(sectors); } catch (e) { lpErr = "pass:" + String(e && e.message || e).slice(0, 80); }
     // Self-heal wedged gates: a generating sector whose four stage flags are
     // complete but whose Moore gate can never open (a neighbor that will
     // never finish). Completing neighbor flags proves the wave passed; force
@@ -423,7 +815,8 @@ let snapLog = [], snapTotal = 0, snapEmpty = 0;
     snapTotal++;
     let st = "?";
     try {
-      const sec = WorldRegister.sections.get(dim, x, y, z);
+      const host = WorldRegister.sectors.get(dim, x, y, z);
+      const sec = host ? host.getSection(x, y, z) : null;
       if (!sec) st = "nolink";
       else {
         const mm = sec.getMinMax();

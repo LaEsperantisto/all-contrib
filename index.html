@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f3ead8">
   <title>All Contribute</title>
   <link rel="icon" type="image/svg+xml" href="./favicon.svg?v=1">
-  <link rel="stylesheet" href="./styles.css?v=8">
+  <link rel="stylesheet" href="./styles.css?v=13">
 </head>
 <body>
   <!-- The site IS the game: opening the page boots straight into the shared
@@ -17,7 +17,10 @@
     <div class="hud-top">
       <span id="hud-server" class="hud-chip">server: —</span>
       <span id="hud-coords" class="hud-chip">x 0 · y 0 · z 0</span>
-      <span id="hud-held" class="hud-chip">no item</span>
+    </div>
+    <div id="hud-held" class="hud-held">
+      <span id="hud-held-icon" class="hud-held-icon" aria-hidden="true"></span>
+      <span id="hud-held-name">no item</span>
     </div>
     <div id="hotbar"></div>
     <div id="hud-health" class="hud-health" aria-label="Health"><span class="hud-health-label">♥</span></div>
@@ -27,6 +30,7 @@
       <button id="hud-character" class="button button-quiet" type="button">Character <small>C</small></button>
       <button id="hud-inventory" class="button button-quiet" type="button">Inventory <small>I</small></button>
       <button id="hud-studio" class="button button-quiet" type="button">Studio <small>B</small></button>
+      <button id="hud-third" class="button button-quiet" type="button">Third person <small>&#9003;</small></button>
       <button id="hud-menu" class="button button-quiet" type="button">Menu <small>Esc</small></button>
     </div>
     <div id="game-loading">
@@ -51,10 +55,40 @@
     <p class="modal-sub">One shared, server-authoritative voxel world. Build it together.</p>
     <div class="pause-menu">
       <button id="mm-join" class="button button-primary full" type="button">Join global server</button>
+      <label class="menu-field">Server <select id="mm-server-list"></select></label>
+      <span class="button-row">
+        <button id="mm-server-create" class="button button-outline" type="button">Create server</button>
+        <button id="mm-server-delete" class="button button-quiet" type="button" hidden>Delete</button>
+      </span>
+      <span class="button-row">
+        <button id="mm-login" class="button button-outline" type="button">Log in</button>
+        <button id="mm-register" class="button button-outline" type="button">Create account</button>
+      </span>
       <button id="mm-instructions" class="button button-outline full" type="button">Instructions</button>
       <button id="mm-settings" class="button button-outline full" type="button">Settings</button>
     </div>
     <p class="micro-note"><span id="mm-server-chip">Server: global</span> · <span id="mm-account-chip">not signed in</span></p>
+  </dialog>
+
+  <!-- Creating a world of your own: a name and a visibility. Private stays on
+       this device, LAN opens to the same local network, public is open to
+       anyone who can reach this site's API. -->
+  <dialog id="create-server" class="modal">
+    <h2>Create a server</h2>
+    <p class="modal-sub">A server is a world of your own: its own blocks, its own day, its own mobs. The global world stays as it is.</p>
+    <label class="create-field">Name <input id="cs-name" maxlength="32" placeholder="My world"></label>
+    <label class="create-field">Who can reach it
+      <select id="cs-visibility">
+        <option value="private">Private — this device only</option>
+        <option value="lan">LAN — devices on my local network</option>
+        <option value="public">Public — anyone who can reach this site</option>
+      </select>
+    </label>
+    <p id="cs-note" class="micro-note"></p>
+    <div class="pause-menu">
+      <button id="cs-create" class="button button-primary full" type="button">Create</button>
+      <button id="cs-cancel" class="button button-outline full" type="button">Cancel</button>
+    </div>
   </dialog>
 
   <!-- Pause / main menu (Esc or the Menu button). -->
@@ -67,11 +101,33 @@
       <button id="pause-inventory" class="button button-outline full" type="button">Inventory</button>
       <button id="pause-studio" class="button button-outline full" type="button">Studio</button>
       <button id="pause-settings" class="button button-outline full" type="button">Settings</button>
-      <button id="pause-resync" class="button button-outline full" type="button" hidden>Resync world</button>
       <button id="pause-mainmenu" class="button button-outline full" type="button">Main menu</button>
       <button id="pause-account" class="button button-outline full" type="button">Account</button>
     </div>
     <p class="micro-note">The world is shared and server-authoritative: your edits land for every player. Log in (or create an account) to keep your inventory and creations.</p>
+  </dialog>
+
+  <!-- Admin settings: the admin account alone can open it, with +. -->
+  <dialog id="admin-panel" class="modal">
+    <form method="dialog" class="modal-close"><button aria-label="Close">×</button></form>
+    <span class="eyebrow" id="admin-eyebrow">ADMIN</span><h2 id="admin-title">Admin settings</h2>
+    <div class="time-panel">
+      <div class="time-head"><span class="eyebrow">Time of day</span><span id="time-readout" class="time-readout"></span></div>
+      <input id="time-slider" type="range" min="0" max="0.999" step="0.005" value="0.5" aria-label="Time of day">
+      <div class="time-row">
+        <button class="button button-outline" type="button" data-time="0">Night</button>
+        <button class="button button-outline" type="button" data-time="0.28">Dawn</button>
+        <button class="button button-outline" type="button" data-time="0.5">Day</button>
+        <button class="button button-outline" type="button" data-time="0.76">Dusk</button>
+      </div>
+      <div class="time-row">
+        <button id="time-freeze" class="button button-outline" type="button">Stop the cycle</button>
+        <button id="time-sun" class="button button-outline" type="button">Let the sun run it</button>
+      </div>
+      <p class="micro-note">The clock belongs to the world, not to this browser: every player's sky follows it, including a player who joins later. "Let the sun run it" hands the day back to each machine's wall clock.</p>
+    </div>
+    <button id="admin-resync" class="button button-outline full" type="button" hidden>Resync world</button>
+    <p class="micro-note">Resync re-runs the truth: derived rows that lost their voxel are deleted, every surviving edit and light column is replayed to everyone, and each client rebuilds its world from the database.</p>
   </dialog>
 
   <!-- Instructions: the very same text the join overlay shows for its ten
@@ -180,19 +236,31 @@
           <p class="micro-note">Registry ID becomes <code id="block-id-preview">player:you:myns:starstone</code></p>
           <div class="form-row"><label>Hardness<input id="block-hardness" type="number" min="0" max="1000" step="0.1" value="2"></label><label>Light (0–15)<input id="block-light" type="number" min="0" max="15" value="0"></label></div>
           <label>Colour<input id="block-colour" type="color" value="#8b72e8" class="colour-input"></label>
-          <label>Behaviour <span class="optional">safe, declarative</span><select id="block-behaviour"><option value="solid">Solid</option><option value="transparent">Transparent</option><option value="glowing">Glowing</option><option value="decorative">Decorative</option></select></label>
+          <label>Behaviour <span class="optional">safe, declarative</span><select id="block-behaviour"><option value="solid">Solid</option><option value="transparent">Transparent</option><option value="glowing">Glowing</option><option value="decorative">Decorative</option><option value="useful">Useful</option></select></label>
           <div class="form-row">
-            <label>Support<select id="block-support"><option value="solid">Needs solid below</option><option value="any">Any empty cell</option><option value="none">Needs empty below</option></select></label>
+            <label>Support<select id="block-support"><option value="any" selected>Any empty cell</option><option value="solid">Needs solid below</option><option value="none">Needs empty below</option></select></label>
             <label>Incompatible IDs <span class="optional">comma-separated; placement refuses next to these</span><input id="block-incompatible" placeholder="builtin:stone, …" autocomplete="off" spellcheck="false"></label>
           </div>
           <div class="edit-note" id="block-edit-note" hidden>Editing <code id="block-edit-id"></code> — the ID cannot change. <button type="button" id="block-edit-cancel" class="text-button">Cancel edit</button></div>
           <div class="field-group">
             <h3 class="field-group-title">Look and programming <span class="optional">optional</span></h3>
             <div class="appearance-row">
-              <label>Texture <span class="optional">PNG, resampled to 16×16</span>
+              <label>Texture <span class="optional">PNG, resampled to 16×16; the block's four sides</span>
                 <input id="block-texture" type="file" accept="image/png,image/jpeg">
               </label>
               <div class="texture-preview"><img id="block-texture-preview" class="pixel-art" hidden alt="Published block texture"><button class="button button-outline tiny" id="block-texture-clear" type="button" hidden>Remove</button></div>
+            </div>
+            <div class="appearance-row">
+              <label>Top texture <span class="optional">PNG; a cube's upper face, otherwise the texture above</span>
+                <input id="block-texture-top" type="file" accept="image/png,image/jpeg">
+              </label>
+              <div class="texture-preview"><img id="block-texture-top-preview" class="pixel-art" hidden alt="Published block top texture"><button class="button button-outline tiny" id="block-texture-top-clear" type="button" hidden>Remove</button></div>
+            </div>
+            <div class="appearance-row">
+              <label>Bottom texture <span class="optional">PNG; a cube's lower face, otherwise the texture above</span>
+                <input id="block-texture-bottom" type="file" accept="image/png,image/jpeg">
+              </label>
+              <div class="texture-preview"><img id="block-texture-bottom-preview" class="pixel-art" hidden alt="Published block bottom texture"><button class="button button-outline tiny" id="block-texture-bottom-clear" type="button" hidden>Remove</button></div>
             </div>
             <label>Model <span class="optional">shape the renderer draws</span><select id="block-model"><option value="">Full cube (default)</option></select></label>
             <label>Script <span class="optional">Lua; runs on the Worker when a player presses E on this block</span>
@@ -265,6 +333,6 @@
   </dialog>
 
   <div id="toast" role="status" class="toast"></div>
-  <script src="./app.js?v=16"></script>
+  <script src="./app.js?v=25"></script>
 </body>
 </html>

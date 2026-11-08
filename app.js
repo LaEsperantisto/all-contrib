@@ -8,7 +8,13 @@ const $ = (id) => document.getElementById(id);
 // colour and shows colour swatches for items; "detailed" uses the textures,
 // 3D models and item icons an author published. Changing it re-takes effect on
 // the next Join (vlox textures are compiled when the world is created).
-const DEFAULT_SETTINGS = { server: "global", sens: 5, fov: 80, distance: 900, speed: 8, render: "flat" };
+// Opening the page from a machine's own address — localhost, 127.x, a LAN
+// address — means that machine's dev Worker is the API you mean; a page served
+// over https can only reach the published Worker (http would be mixed content).
+// Local hosting includes a LAN address: opening the game from
+// http://192.168.1.20:8000 has to be able to reach that machine's API.
+const isLocalPage = /^(localhost|127\.|\[?::1\]?$|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)/.test(location.hostname);
+const DEFAULT_SETTINGS = { server: isLocalPage ? "local" : "global", serverId: "global", sens: 5, fov: 80, distance: 900, speed: 8, render: "flat" };
 // Ten quick-select slots: keys 1-9 then 0.
 const HOTBAR_SLOTS = 10;
 let settings = { ...DEFAULT_SETTINGS };
@@ -16,21 +22,133 @@ try {
   const raw = JSON.parse(localStorage.getItem("ac_settings") || "{}");
   if (raw && typeof raw === "object") settings = { ...settings, ...raw };
 } catch { /* defaults */ }
-if (!["global", "local"].includes(settings.server)) settings.server = "global";
+// The API choice is not an ordinary setting: a page served from a machine's own
+// address (localhost, 127.x, a LAN address) talks to that machine's dev Worker
+// unless the player picked the published Worker by name in Settings. Opening
+// http://127.0.0.1:8000 and signing into a dev account is then enough — there is
+// no hidden switch to find first.
+if (isLocalPage && !localStorage.getItem("ac_server_choice")) settings.server = "local";
+if (!["global", "local"].includes(settings.server)) settings.server = isLocalPage ? "local" : "global";
+if (typeof settings.serverId !== "string" || !settings.serverId) settings.serverId = "global";
 if (!["flat", "detailed"].includes(settings.render)) settings.render = "flat";
 delete settings.mode; delete settings.flySpeed; // legacy keys from older builds
 function saveSettings() { localStorage.setItem("ac_settings", JSON.stringify(settings)); }
-const isLocalPage = ["localhost", "127.0.0.1"].includes(location.hostname);
+// A private server belongs to the device that created it. The token is random
+// and lives only in this browser; the API keeps its SHA-256 hash, so a leaked
+// row never hands out the key. Sent on every request as `X-AC-Device`.
+if (!/^[0-9a-f]{32,}$/.test(String(settings.device || ""))) {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  settings.device = [...bytes].map(b => b.toString(16).padStart(2, "0")).join("");
+  saveSettings();
+}
 if (!isLocalPage) settings.server = "global"; // https page → http dev API is mixed content
 let API_BASE = settings.server === "local" && isLocalPage
-  ? "http://127.0.0.1:8787"
+  ? `http://${location.hostname}:8787`
   : "https://all-contrib.all-contrib.workers.dev";
 function updateServerChip() {
-  const label = settings.server === "local" && isLocalPage ? "Server: local dev" : "Server: global";
-  $("hud-server").textContent = label.toLowerCase();
-  $("pause-server-chip").textContent = label;
-  $("mm-server-chip").textContent = label;
+  const label = settings.serverId !== "global"
+    ? serverTitle(serverRows.find(s => s.id === settings.serverId) || { id: settings.serverId, name: settings.serverId, visibility: "private" })
+    : (settings.server === "local" && isLocalPage ? "local dev" : "global");
+  $("hud-server").textContent = `server: ${label}`.toLowerCase();
+  $("pause-server-chip").textContent = `Server: ${label}`;
+  $("mm-server-chip").textContent = `Server: ${label}`;
 }
+// ---- Servers: the global world plus worlds a player hosts ------------------
+// A server is a scoped world: its own blocks, clock, mobs and spawn points.
+// `global` is the shared world and needs no id anywhere, so an unconfigured
+// client behaves exactly as before. Visibility decides who may reach it:
+// private = this device's token, LAN = the same local network, public = anyone.
+let serverRows = [];
+let pendingServerDelete = null;
+function serverTitle(s) {
+  const v = s.visibility === "lan" ? "LAN" : s.visibility === "public" ? "public" : "private";
+  if (s.id === "global") return "Global — everyone";
+  return `${s.name} (${v})`;
+}
+// Which world a request is about. Omitted for the global world so old
+// deployments and other clients keep working unchanged.
+const srvQS = () => `&server=${encodeURIComponent(settings.serverId)}`;
+const srvBody = (extra = {}) => ({ ...extra, server: settings.serverId });
+async function refreshServers() {
+  try {
+    const d = await api("/api/servers");
+    serverRows = Array.isArray(d.servers) ? d.servers : [];
+  } catch { serverRows = []; }   // offline or not signed in: only the global world
+  window.__servers = serverRows;   // the worlds this device can reach, by id
+  renderServerPicker();
+}
+function renderServerPicker() {
+  const sel = $("mm-server-list");
+  if (!sel) return;
+  const rows = [{ id: "global", visibility: "public" }, ...serverRows.filter(s => s.id !== "global")];
+  sel.innerHTML = "";
+  for (const s of rows) {
+    const o = document.createElement("option");
+    o.value = s.id;
+    o.textContent = serverTitle(s);
+    sel.appendChild(o);
+  }
+  if (!rows.some(s => s.id === settings.serverId)) settings.serverId = "global";
+  sel.value = settings.serverId;
+  const mine = serverRows.find(s => s.id === settings.serverId);
+  const del = $("mm-server-delete");
+  del.hidden = !(mine && mine.mine);
+  del.textContent = pendingServerDelete === settings.serverId ? "Delete again to confirm" : "Delete";
+  updateServerChip();
+  updateJoinLabel();
+}
+function updateJoinLabel() {
+  if (settings.serverId !== "global") { $("mm-join").textContent = `Join ${serverTitle({ id: settings.serverId, name: (serverRows.find(s => s.id === settings.serverId) || {}).name || settings.serverId, visibility: (serverRows.find(s => s.id === settings.serverId) || {}).visibility })}`; return; }
+  $("mm-join").textContent = settings.server === "local" && isLocalPage ? "Join local server" : "Join global server";
+}
+const CS_NOTES = {
+  private: "Only this browser can join it: the world is locked to a key kept in this device's storage. Nothing is shared, not even with your other devices.",
+  lan: "Other devices on the same local network can see and join it. Open the game from that machine's address — for example http://192.168.1.20:8000 — and every device on that network reaches it.",
+  public: "Anyone who can reach this site's API can see and join it. To carry the world traffic yourself, run the server on your own machine, open the game from its address, and forward port 8787 on your router to it.",
+};
+$("mm-server-list").addEventListener("change", () => {
+  settings.serverId = $("mm-server-list").value;
+  pendingServerDelete = null;
+  saveSettings();
+  renderServerPicker();
+});
+$("mm-server-create").addEventListener("click", () => {
+  if (!authenticated) { toast("Log in to create a server.", true); return; }
+  $("cs-name").value = "";
+  $("cs-visibility").value = "public";
+  $("cs-note").textContent = CS_NOTES.public;
+  $("create-server").showModal();
+});
+$("cs-visibility").addEventListener("change", () => { $("cs-note").textContent = CS_NOTES[$("cs-visibility").value] || ""; });
+$("cs-cancel").addEventListener("click", () => $("create-server").close());
+$("cs-create").addEventListener("click", async () => {
+  const name = $("cs-name").value.trim();
+  if (!name) { toast("Give the server a name.", true); return; }
+  let r = null;
+  try {
+    r = await api("/api/servers", { method: "POST", body: JSON.stringify({ name, visibility: $("cs-visibility").value }) });
+  } catch (err) { toast(err.message, true); return; }
+  if (!r || !r.server) { toast((r && r.error) || "The server was not created.", true); return; }
+  $("create-server").close();
+  settings.serverId = r.server.id;
+  saveSettings();
+  await refreshServers();
+  toast(`Created “${r.server.name}”. Join when you are ready.`);
+});
+$("mm-server-delete").addEventListener("click", async () => {
+  const id = settings.serverId;
+  if (id === "global") return;
+  if (pendingServerDelete !== id) { pendingServerDelete = id; renderServerPicker(); return; }  // two-step, no native confirm
+  try {
+    await api(`/api/servers/${encodeURIComponent(id)}`, { method: "DELETE" });
+  } catch (err) { toast(err.message, true); return; }
+  pendingServerDelete = null;
+  settings.serverId = "global";
+  saveSettings();
+  await refreshServers();
+  toast("Server deleted — its world is gone.");
+});
 // Sensitivity slider 1..10 → radians per pixel; FOV degrees → Babylon vertical rad.
 const viewSettings = () => ({
   sensitivity: settings.sens * 0.00046,
@@ -120,7 +238,7 @@ function toast(message, error=false) {
   clearTimeout(toastTimer); toastTimer=setTimeout(()=>el.className="toast",3200);
 }
 async function api(path, options={}) {
-  const headers={"Content-Type":"application/json","X-AC-Request":"1",...(options.headers||{})};
+  const headers={"Content-Type":"application/json","X-AC-Request":"1","X-AC-Device":settings.device,...(options.headers||{})};
   let response;
   try {
     response=await fetch(API_BASE+path,{
@@ -146,20 +264,83 @@ function setConnection(online) {
   $("pause-server-chip").textContent = `Server: ${label}${online ? "" : " (offline)"}`;
 }
 function updateAccountChip(){
-  const label = authenticated && username ? username : "not signed in";
+  const label = authenticated && username
+    ? (settings.serverId === "global" ? username : `${username} @ ${serverTitle(serverRows.find(s => s.id === settings.serverId) || { name: settings.serverId, visibility: "private" })}`)
+    : "not signed in";
   $("pause-account-chip").textContent = label;
   $("mm-account-chip").textContent = label;
+  // The landing page offers the two entry points directly: the auth dialog is
+  // a form, not a page, so a player who has not played yet should not have to
+  // discover it behind a Join click.
+  $("mm-login").hidden = authenticated;
+  $("mm-register").hidden = authenticated;
   $("pause-account").textContent = authenticated && username ? "Account" : "Log in / Register";
 }
 // The admin account is literally named "admin" — that exact username is the
 // whole role. Inventory surgery (test items, −1, clear) is admin-only and the
 // Worker enforces the same rule, so a tampered DOM cannot reach it.
 function isAdmin(){return authenticated&&String(username||"") === "admin";}
+// Who may run this world: the site admin anywhere, and the player who created
+// the server you are standing on. The global world has no owner, so only the
+// admin can dial it.
+function ownsCurrentServer(){return settings.serverId!=="global"&&!!(serverRows.find(s=>s.id===settings.serverId)||{}).mine;}
+function canControlWorld(){return isAdmin()||ownsCurrentServer();}
 function renderAdminTools(){
   $("add-item-form").hidden=!isAdmin();
   $("add-item-note").hidden=!isAdmin();
   $("clear-inventory-button").hidden=!isAdmin();
-  $("pause-resync").hidden=!isAdmin();
+  $("admin-resync").hidden=!canControlWorld();
+  const owner=!isAdmin()&&ownsCurrentServer();
+  $("admin-eyebrow").textContent=owner?"YOUR SERVER":"ADMIN";
+  $("admin-title").textContent=owner?"Server settings":"Admin settings";
+  renderTimePanel();
+}
+// The world's clock: `phase` 0..1 through the in-game day (0 = midnight), or
+// null while the sun still runs it off each machine's wall clock. The live
+// socket delivers it — at join and whenever the admin dials it.
+let worldClock=null;
+function applyClock(m){
+  worldClock={phase:m&&m.phase===undefined?null:m.phase,running:!(m&&m.running===false)};
+  if(dveView)dveView.setClock(worldClock.phase,worldClock.running);
+  renderTimePanel();
+}
+const clockLabel=()=>{
+  const t=dveView?dveView.clock:{phase:null,running:true,set:false};
+  const phase=typeof t.phase==="number"?t.phase:null;
+  if(phase===null)return"the sun's clock";
+  const mins=Math.round(phase*24*60)%1440;
+  return `${String(Math.floor(mins/60)).padStart(2,"0")}:${String(mins%60).padStart(2,"0")}${t.running?"":" · stopped"}`;
+};
+function renderTimePanel(){
+  const readout=$("time-readout");
+  if(readout)readout.textContent=clockLabel();
+  const freeze=$("time-freeze");
+  if(freeze)freeze.textContent=(worldClock&&worldClock.running===false)?"Start the cycle":"Stop the cycle";
+  const slider=$("time-slider");
+  if(slider&&worldClock&&typeof worldClock.phase==="number")slider.value=String(worldClock.phase);
+}
+// Dial the clock. The Worker answers with the same shape the live socket
+// broadcasts, so applying it here is idempotent — and it is what makes the
+// admin's own screen change without waiting for the frame to come back.
+async function setTime(body){
+  if(!canControlWorld()){toast("Only the admin or the owner of this server can set the time of day.",true);return;}
+  let r=null;
+  try{r=await api("/api/time",{method:"POST",body:JSON.stringify(srvBody(body))});}
+  catch(err){toast(err.message,true);return;}
+  if(!r||r.ok!==true){toast(r&&(r.error||"The clock did not move."),true);return;}
+  applyClock(r);
+  toast(`Time of day: ${clockLabel()}.`);
+}
+// A push is only as good as the socket that carries it. The frame arrives when
+// a socket opens and whenever the dial moves, but a client that happened to be
+// mid-reconnect at that moment would keep the old sky forever — and only the
+// admin's own screen would be right, because it made the request. So the phase
+// is pulled as well as pushed: at join, on every reconnect, and whenever the
+// admin opens the dial.
+async function syncClock(){
+  if(!dveView)return;
+  try{applyClock(await api(`/api/time?server=${encodeURIComponent(settings.serverId)}`));}
+  catch{/* keep whatever the socket last said */}
 }
 // Health bar: ten hearts, half hearts allowed (health is 0..20 server units).
 function renderHealth(){
@@ -188,7 +369,7 @@ function hideDeath(){
 }
 $("death-respawn").addEventListener("click",async()=>{
   try{
-    const data=await api("/api/player/respawn",{method:"POST",body:"{}"});
+    const data=await api("/api/player/respawn",{method:"POST",body:JSON.stringify(srvBody())});
     health=Number(data.health)??MAX_HEALTH;
     hideDeath();
     if(dveView&&data.state)dveView.setPose(data.state);
@@ -201,15 +382,40 @@ $("death-menu").addEventListener("click",()=>{
   hideDeath();
   $("death-screen").hidden=true;
   updateServerChip();updateAccountChip();
+  void refreshServers();
   $("main-menu").showModal();
   if(dveView)dveView.releaseInput();
   $("game").hidden=true;
   syncGrabBtn();
 });
+function liveReconnect(){
+  // Presence identity is the login, and the world object only ever sees the
+  // headers the socket arrived with. A socket opened before this login (or kept
+  // after a logout) is still that guest, so re-handshake it: the close handler
+  // dials a new one, which arrives carrying the session.
+  if(!ws||ws.readyState>1)return;
+  wsRetry=0;
+  try{ws.close();}catch{}
+}
+// Joining reads your account before you have necessarily signed in, and the
+// body built by that join is painted with the plain default colours. The look
+// belongs to the account, so signing in mid-game has to repaint your own body
+// with the saved colours, exactly like signing in refreshes your bag.
+async function refreshSelfLook(){
+  if(!dveView)return;
+  try{
+    const r=await api(`/api/player/state?server=${encodeURIComponent(settings.serverId)}`);
+    if(r&&r.appearance){
+      appearance={...DEFAULT_APPEARANCE,...r.appearance};
+      dveView.setSelfAppearance(appearance);
+    }
+  }catch{}
+}
 function setAuthenticatedUser(name){
   username=name;
   authenticated=true;
   localStorage.setItem("ac_username",name);
+  liveReconnect();
   updateAccountChip();
   renderInventory();
   renderCrafting();
@@ -217,12 +423,15 @@ function setAuthenticatedUser(name){
   renderMyItems();
   renderMyRecipes();
   renderAdminTools();
+  refreshSelfLook();
+  void refreshServers();   // your own worlds appear once you are signed in
   migrateLegacyInventory().then(refreshInventory);
 }
 function clearAuthenticatedUser(){
   authenticated=false;
   username=null;
   localStorage.removeItem("ac_username");
+  liveReconnect();
   inventory={};
   selectedItem=null;
   updateAccountChip();
@@ -277,6 +486,10 @@ function formatDate(value){
 }
 
 $("pause-account").addEventListener("click",openAccountDialog);
+// The auth form opens over the landing rather than replacing it: closing the
+// landing would leave nowhere to press Join after signing in.
+$("mm-login").addEventListener("click",()=>openAuth("login"));
+$("mm-register").addEventListener("click",()=>openAuth("register"));
 $("logout-button").addEventListener("click",async()=>{
   const button=$("logout-button");button.disabled=true;
   try{
@@ -384,11 +597,32 @@ function itemStatLine(item){
   if(item.kind==="block")bits.push(`places ${item.place_block_id||"—"}`);
   return bits.join(" · ");
 }
+// The colour of the item in hand — what other players see on your avatar's
+// cube, and what third person paints on your own.
+function heldColour(id){
+  const meta=id?itemMeta(id):null;
+  return meta&&/^#[0-9a-f]{6}$/i.test(String(meta.colour||""))?meta.colour:null;
+}
+// The uploaded icon of an item, when it has one: the same data-URL the bag
+// cards show, used for the held HUD, the hand cube and the pose frames.
+function iconUrl(id){
+  const meta=id?itemMeta(id):null;
+  return meta&&SAFE_IMAGE.test(meta.icon||"")?meta.icon:null;
+}
+// The Minecraft-style bottom-right readout: the selected item's own image
+// (icon when the registry has one, its colour swatch otherwise) and name.
+function paintHeldHud(){
+  const id=selectedItem,meta=id?itemMeta(id):null;
+  const name=$("hud-held-name"),icon=$("hud-held-icon");
+  if(name)name.textContent=meta?`${meta.name}${KIND_LABEL[meta.kind]?` · ${KIND_LABEL[meta.kind]}`:""}`:(id||"no item");
+  if(icon)icon.innerHTML=iconUrl(id)?`<img src="${iconUrl(id)}" alt="">`:
+    `<span class="hud-held-swatch" style="background:${meta&&/^#[0-9a-f]{6}$/i.test(meta.colour||"")?meta.colour:"#999"}"></span>`;
+}
 function selectItem(id){
   selectedItem=id;
   renderInventory();renderHotbar();
-  const meta=id?itemMeta(id):null;
-  $("hud-held").textContent=meta?`${meta.name}${KIND_LABEL[meta.kind]?` · ${KIND_LABEL[meta.kind]}`:""}`:(id||"no item");
+  paintHeldHud();
+  if(dveView)dveView.setSelfHeld(heldColour(id),iconUrl(id));
 }
 function renderInventory(){
   // The server returns the player's own arrangement (see /api/inventory), so
@@ -572,13 +806,18 @@ function wireImageField(inputId,previewId,clearId,size){
   clear.addEventListener("click",()=>{value=null;paint();});
   return { value:()=>value, set:v=>{value=v||null;paint();} };
 }
-// The extra parts a block can publish: a 16x16 texture, one of the shipped
-// voxel models, and an optional Lua script. The model list comes from the
-// Worker, so the dropdown can only ever offer what the renderer understands.
+// The extra parts a block can publish: textures (a block's own, plus optional
+// top and bottom faces), one of the shipped voxel models, and an optional Lua
+// script. The model list comes from the Worker, so the dropdown can only ever
+// offer what the renderer understands.
 const blockTextureField=wireImageField("block-texture","block-texture-preview","block-texture-clear",16);
+const blockTextureTopField=wireImageField("block-texture-top","block-texture-top-preview","block-texture-top-clear",16);
+const blockTextureBottomField=wireImageField("block-texture-bottom","block-texture-bottom-preview","block-texture-bottom-clear",16);
 const itemIconField=wireImageField("item-icon","item-icon-preview","item-icon-clear",32);
 function resetBlockAppearance(){
   blockTextureField.set(null);
+  blockTextureTopField.set(null);
+  blockTextureBottomField.set(null);
   $("block-model").value="";$("block-script").value="";
 }
 function modelLabel(model){
@@ -595,7 +834,7 @@ $("block-form").addEventListener("submit",async e=>{
   e.preventDefault();if(!authenticated){openAuth("login");toast("Log in to publish a block.");return;}
   const rules={support:$("block-support").value,incompatibleWith:$("block-incompatible").value.split(",").map(x=>x.trim().toLowerCase()).filter(Boolean)};
   const common={name:$("block-name").value,hardness:Number($("block-hardness").value),light:Number($("block-light").value),colour:$("block-colour").value,behaviour:$("block-behaviour").value,rules,
-    texture:blockTextureField.value(),model:$("block-model").value||null,script:$("block-script").value.trim()||null};
+    texture:blockTextureField.value(),texture_top:blockTextureTopField.value(),texture_bottom:blockTextureBottomField.value(),model:$("block-model").value||null,script:$("block-script").value.trim()||null};
   try{
     if(editingBlockId){
       await api(`/api/blocks/${encodeURIComponent(editingBlockId)}`,{method:"PUT",body:JSON.stringify(common)});
@@ -622,6 +861,8 @@ function enterEditMode(block){
   $("block-behaviour").value=block.behaviour;$("block-support").value=rules.support||"solid";
   $("block-incompatible").value=(rules.incompatibleWith||[]).join(", ");
   blockTextureField.set(block.texture||null);
+  blockTextureTopField.set(block.texture_top||null);
+  blockTextureBottomField.set(block.texture_bottom||null);
   $("block-model").value=block.model||"";$("block-script").value=block.script||"";
   $("block-namespace").readOnly=true;$("block-id").readOnly=true;
   $("block-edit-note").hidden=false;$("block-edit-id").textContent=block.id;
@@ -904,6 +1145,7 @@ $("pause-mainmenu").addEventListener("click",()=>{
   // Open the landing first so the pause-close handler never re-grabs the
   // cursor, then tear the game screen down around the live engine.
   updateServerChip();updateAccountChip();
+  void refreshServers();
   $("main-menu").showModal();
   $("pause-dialog").close();
   if(dveView)dveView.releaseInput();
@@ -912,7 +1154,35 @@ $("pause-mainmenu").addEventListener("click",()=>{
 });
 $("pause-inventory").addEventListener("click",openInventoryDialog);
 $("pause-studio").addEventListener("click",()=>$("studio-dialog").showModal());
-$("pause-resync").addEventListener("click",resyncWorld);
+// The admin settings live in their own dialog, opened with + by the admin
+// account alone; the pause menu stays the same for everybody else. Opening it
+// re-reads the clock, so an admin whose socket once missed a push still sees the
+// truth the moment they look.
+function openAdminPanel(){
+  if(!canControlWorld()){toast("Only the admin or the owner of this server has these settings.",true);return false;}
+  renderTimePanel();
+  $("admin-panel").showModal();
+  void syncClock();
+  return true;
+}
+$("admin-resync").addEventListener("click",resyncWorld);
+// The admin's dial: four buttons for the key moments of the day, a slider for
+// anywhere in between, and a switch that freezes the cycle wherever it stands.
+// Dialling never changes whether the cycle runs — an admin stopped at midnight
+// who drags to dawn wants dawn stopped, and "Stop the cycle" is the only thing
+// that starts it again. Stopping captures the phase first: with the sun still
+// running there is no phase stored, and a stopped clock with no phase would
+// simply keep running.
+const runningNow=()=>!(worldClock&&worldClock.running===false);
+for(const button of document.querySelectorAll("#admin-panel [data-time]"))button.addEventListener("click",()=>setTime({phase:Number(button.dataset.time),running:runningNow()}));
+$("time-slider").addEventListener("change",e=>setTime({phase:Number(e.target.value),running:runningNow()}));
+$("time-freeze").addEventListener("click",()=>{
+  // Resume keeps the stored phase and restarts the period from this moment, so
+  // the day carries on from where it stopped instead of jumping to the sun.
+  if(runningNow())setTime({phase:dveView?dveView.clock.phase:0.5,running:false});
+  else setTime({running:true});
+});
+$("time-sun").addEventListener("click",()=>setTime({reset:true}));
 $("hud-menu").addEventListener("click",openPause);
 // Look changes the block/item artwork, which the world compiles when it is
 // created — so it applies on the next join, not mid-world.
@@ -931,8 +1201,8 @@ $("set-render").addEventListener("change",()=>{
     if(dveView)dveView.setSettings(viewSettings());
   });
 });
-$("set-server").addEventListener("change",()=>{settings.server=$("set-server").value;saveSettings();location.reload();}); // fresh API_BASE, WS, session
-$("settings-reset").addEventListener("click",()=>{settings={...DEFAULT_SETTINGS};if(!isLocalPage)settings.server="global";saveSettings();syncSettingsInputs();if(dveView)dveView.setSettings(viewSettings());});
+$("set-server").addEventListener("change",()=>{settings.server=$("set-server").value;localStorage.setItem("ac_server_choice",settings.server);settings.serverId="global";saveSettings();location.reload();}); // fresh API_BASE, WS, session
+$("settings-reset").addEventListener("click",()=>{settings={...DEFAULT_SETTINGS};localStorage.removeItem("ac_server_choice");if(isLocalPage)settings.server="local";saveSettings();syncSettingsInputs();if(dveView)dveView.setSettings(viewSettings());});
 
 function openInventoryDialog(){
   refreshInventory();
@@ -965,6 +1235,7 @@ $("character-save").addEventListener("click",async()=>{
     if(r&&r.body_colour)appearance={...DEFAULT_APPEARANCE,...r};
     renderCharacterPreview();
     sendPresence(true); // others see the new colours immediately
+    if(dveView)dveView.setSelfAppearance(appearance); // so does your own body
     toast("Character saved.");
   }catch(err){toast(err.message,true);}
 });
@@ -972,6 +1243,15 @@ function openCharacterDialog(){renderCharacterPreview();$("character-dialog").sh
 $("hud-character").addEventListener("click",openCharacterDialog);
 $("hud-inventory").addEventListener("click",openInventoryDialog);
 $("hud-studio").addEventListener("click",()=>$("studio-dialog").showModal());
+// Third person (Backspace or this button) swings the camera behind your own
+// body. It is a camera only: where the body is, what the crosshair picks and
+// what the pose frames report all keep coming from the eye camera.
+function toggleThirdPerson(){
+  if(!dveView)return;
+  const on=dveView.setThirdPerson(!dveView.thirdPerson);
+  $("hud-third").firstChild.nodeValue=on?"First person ":"Third person ";
+}
+$("hud-third").addEventListener("click",toggleThirdPerson);
 document.querySelectorAll("dialog").forEach(d=>d.addEventListener("close",()=>{
   // Exiting any menu back into the game re-grabs the cursor (best effort:
   // Chrome may refuse right after an Esc-exit — the HUD button covers it).
@@ -1001,7 +1281,7 @@ grabBtn.addEventListener("click",()=>{if(dveView)dveView.grabPointer();});
 // fetches the initial edits from the API itself; this map exists so the walk
 // camera and live WS echo see the same state.
 const worldEdits=new Map();
-let headSeq=0,ws=null,wsRetry=0,dveView=null,dveMod=null;
+let headSeq=0,ws=null,wsRetry=0,hadSocket=false,dveView=null,dveMod=null;
 let worldBeams=[];
 const lastWsFailed=()=>ws&&(ws.readyState===2||ws.readyState===3);
 function cellBlock(x,y,z){const o=worldEdits.get(`${x},${y},${z}`);return o!==undefined?o:dveMod.baseBlock(x,y,z);}
@@ -1013,7 +1293,7 @@ function noteEdit(x,y,z,blockId){
 async function loadWorldAll(){
   const S=dveMod.SLAB;
   try{
-    const data=await api(`/api/world?x0=${S.X0}&y0=${S.Y0}&z0=${S.Z0}&x1=${S.X1-1}&y1=${S.Y1-1}&z1=${S.Z1-1}&since=${headSeq}`);
+    const data=await api(`/api/world?x0=${S.X0}&y0=${S.Y0}&z0=${S.Z0}&x1=${S.X1-1}&y1=${S.Y1-1}&z1=${S.Z1-1}&since=${headSeq}${srvQS()}`);
     for(const edit of data.edits)noteEdit(edit.x,edit.y,edit.z,edit.block_id);
     for(const entry of data.log)noteEdit(entry.x,entry.y,entry.z,entry.block_id);
     // Light columns switched on by scripted blocks: cached because this runs
@@ -1022,7 +1302,12 @@ async function loadWorldAll(){
     if(dveView)for(const b of worldBeams)dveView.setBeam(b.x,b.y,b.z,b.colour);
     headSeq=Math.max(headSeq,data.head);
     setConnection(true);
-  }catch{setConnection(false);}
+  }catch(err){
+    setConnection(false);
+    // A refused world is not a dropped connection: the join handler has to say
+    // so, or a private world would simply look like an empty one.
+    if(err&&err.status===403)throw err;
+  }
 }
 // Rebuild this client's world from the server's snapshot. The live socket can
 // leave us holding cells the database never had (a frame for a block that was
@@ -1034,7 +1319,7 @@ async function rebuildWorldFromSnapshot(){
   if(!dveMod)return;
   const known=new Map(worldEdits);
   worldEdits.clear();
-  await loadWorldAll();
+  try{await loadWorldAll();}catch{return;}   // refused or offline: nothing to reconcile against
   for(const key of known.keys()){
     if(worldEdits.has(key))continue;
     const [x,y,z]=key.split(",").map(Number);
@@ -1049,16 +1334,19 @@ async function rebuildWorldFromSnapshot(){
   // The generator paints cells that stream in later, so its edit mirror has to
   // come from the snapshot too.
   if(dveView&&dveView.reloadGeneratorEdits)dveView.reloadGeneratorEdits();
+  // Same reason as the world: the clock push that moved while this socket was
+  // down is never replayed, so ask for it.
+  void syncClock();
 }
 // Admin repair switch: ask the Worker to re-run the edit table (prune derived
 // rows that lost their cell, replay every surviving cell, and send a `resync`
 // frame that makes each client call rebuildWorldFromSnapshot).
 async function resyncWorld(){
-  if(!isAdmin()){toast("Only the admin account can resync the world.",true);return;}
-  const button=$("pause-resync");
+  if(!canControlWorld()){toast("Only the admin or the owner of this server can resync the world.",true);return;}
+  const button=$("admin-resync");
   button.disabled=true;
   try{
-    const r=await api("/api/world/resync",{method:"POST",body:"{}"});
+    const r=await api("/api/world/resync",{method:"POST",body:JSON.stringify(srvBody())});
     const stale=r&&r.stale?r.stale:{log:0,state:0,beams:0,inv:0};
     const cleared=(Number(stale.log)||0)+(Number(stale.state)||0)+(Number(stale.beams)||0)+(Number(stale.inv)||0);
     toast(`World resynced: ${r.replayed} cells replayed, ${cleared} stale rows cleared.`);
@@ -1066,12 +1354,19 @@ async function resyncWorld(){
   button.disabled=false;
 }
 function connectLive(){
-  ws=new WebSocket(API_BASE.replace(/^http/,"ws")+"/api/world/live");
-  ws.onopen=()=>{wsRetry=0;setConnection(true);sendPresence(true);};
-  ws.onmessage=event=>{try{const m=JSON.parse(event.data);
+  ws=new WebSocket(API_BASE.replace(/^http/,"ws")+"/api/world/live?server="+encodeURIComponent(settings.serverId));
+  ws.onopen=()=>{
+    // Anything the world changed while the socket was down is invisible to us:
+    // no edit frame, no beam removal, no roster. The snapshot is the only thing
+    // that can take a stale cell or light column away, so re-take it.
+    const reconnected=hadSocket;
+    hadSocket=true;wsRetry=0;setConnection(true);sendPresence(true);
+    if(reconnected)rebuildWorldFromSnapshot();
+  };
+  ws.onmessage=event=>{let m=null;try{m=JSON.parse(event.data);}catch{return;}try{
     if(m.type==="edit")noteEdit(m.x,m.y,m.z,m.block_id);
-    else if(m.type==="roster"){for(const p of m.players||[])if(dveView&&p.name!==username)dveView.setRemote(p);}
-    else if(m.type==="pose"&&dveView&&m.name!==username)dveView.setRemote(m);
+    else if(m.type==="roster"){for(const p of m.players||[])if(dveView&&p.name!==username){p.heldIcon=iconUrl(p.heldItem);dveView.setRemote(p);}}
+    else if(m.type==="pose"&&dveView&&m.name!==username){m.heldIcon=iconUrl(m.heldItem);dveView.setRemote(m);}
     else if(m.type==="leave"&&dveView)dveView.removeRemote(m.name);
     else if(m.type==="mobs"&&dveView)applyMobSnapshot(m.mobs||[]);
     // A body was just struck: flash it white on every screen, including for the
@@ -1091,9 +1386,16 @@ function connectLive(){
     else if(m.type==="hurt")applyHealth(m);
     else if(m.type==="died")applyDeath(m);
     else if(m.type==="respawn")applyRespawn(m);
+    // The admin dialled the world's clock (or handed it back to the sun).
+    else if(m.type==="time")applyClock(m);
     // The admin re-ran the edit table: rebuild from the snapshot.
     else if(m.type==="resync")rebuildWorldFromSnapshot();
-  }catch{/* ignore non-JSON frames */}};
+  }catch(error){
+    // A frame that is not JSON is nothing; a frame that parsed and then broke
+    // the view is a bug that used to be invisible - the pose branch once threw
+    // for every player, and the screen simply never showed anybody.
+    console.warn("live "+(m&&m.type)+" frame failed:",error);
+  }};
   ws.onclose=()=>{setConnection(false);setTimeout(connectLive,Math.min(15000,500*2**wsRetry++));};
   ws.onerror=()=>{try{ws.close();}catch{/* already closed */}};
 }
@@ -1115,9 +1417,8 @@ function sendPresence(force){
   presenceAt=now;
   // `pitch` tilts other players' heads; `held` is the colour of the item in
   // hand, so you can tell who is holding a pick, a sword or nothing.
-  const meta=selectedItem?itemMeta(selectedItem):null;
-  const held=meta&&/^#[0-9a-f]{6}$/i.test(String(meta.colour||""))?meta.colour:null;
-  try{ws.send(JSON.stringify({type:"pose",name:username||"someone",x:p.x,y:p.y,z:p.z,yaw:p.yaw,pitch:p.pitch,held,appearance,vx,vy,vz}));}catch{/* racing a close */}
+  const held=heldColour(selectedItem);
+  try{ws.send(JSON.stringify({type:"pose",name:username||"someone",x:p.x,y:p.y,z:p.z,yaw:p.yaw,pitch:p.pitch,held,...(selectedItem?{heldItem:selectedItem}:{}),appearance,vx,vy,vz}));}catch{/* racing a close */}
 }
 setInterval(sendPresence,250);
 
@@ -1200,7 +1501,7 @@ async function interactUnderCrosshair(){
   if(!hit||!hit.position)return;
   const x=hit.position.x|0,y=hit.position.y|0,z=hit.position.z|0;
   let r=null;
-  try{r=await api("/api/block/interact",{method:"POST",body:JSON.stringify({x,y,z})});}
+  try{r=await api("/api/block/interact",{method:"POST",body:JSON.stringify(srvBody({x,y,z}))});}
   catch(err){toast(err.message,true);return;}
   if(!r||r.ok!==true){
     // Silence is right for an ordinary block ("unscripted") or empty air, but a
@@ -1227,7 +1528,7 @@ $("interact-options").addEventListener("click",async e=>{
   const {x,y,z}=interactTarget;
   $("interact-dialog").close();
   try{
-    const r=await api("/api/block/interact",{method:"POST",body:JSON.stringify({x,y,z,key:b.dataset.choice})});
+    const r=await api("/api/block/interact",{method:"POST",body:JSON.stringify(srvBody({x,y,z,key:b.dataset.choice}))});
     if(r&&r.reason==="script-error")toast(`That block's script is broken: ${r.error||"it failed to run"}.`,true);
     for(const t of (r&&r.toasts)||[])toast(t);
     // The script may have taken items out of, or put them into, this player's
@@ -1242,7 +1543,7 @@ async function eatSelected(){
   if(!meta||meta.kind!=="food"){toast("Select a food item to eat.",true);return;}
   if(health>=MAX_HEALTH){toast("You are already at full health.",true);return;}
   try{
-    const data=await api("/api/player/eat",{method:"POST",body:JSON.stringify({item_id:selectedItem})});
+    const data=await api("/api/player/eat",{method:"POST",body:JSON.stringify({item_id:selectedItem,...srvBody()})});
     health=Math.max(0,Math.min(MAX_HEALTH,Number(data.health)||health));
     renderHealth();
     await refreshInventory();
@@ -1256,7 +1557,7 @@ async function worldAction(button,x,y,z){
   if(!authenticated){openAuth("login");toast("Log in to build in the shared world.");return;}
   try{
     if(button===2){
-      const data=await api("/api/world/break",{method:"POST",body:JSON.stringify({x,y,z})});
+      const data=await api("/api/world/break",{method:"POST",body:JSON.stringify(srvBody({x,y,z}))});
       // A scripted block can speak as it dies, and its store comes out with it:
       // the toast says what actually landed in the bag, not a guess.
       const bits=[`Broke ${data.dropped} at ${x} ${y} ${z}`];
@@ -1266,7 +1567,7 @@ async function worldAction(button,x,y,z){
       toast(said?`${bits.join(" — ")} — ${said}`:`${bits.join(" — ")}.`);
     }else{
       if(!selectedItem){toast("Pick an item from your inventory or hotbar first.",true);return;}
-      await api("/api/world/place",{method:"POST",body:JSON.stringify({x,y,z,item_id:selectedItem})});
+      await api("/api/world/place",{method:"POST",body:JSON.stringify(srvBody({x,y,z,item_id:selectedItem}))});
       toast(`Placed ${selectedItem} at ${x} ${y} ${z}.`);
     }
     await refreshInventory();
@@ -1281,7 +1582,7 @@ async function worldAction(button,x,y,z){
 // One source for the control brief: the join overlay and the Instructions menu
 // (main menu + pause menu) both render this exact string.
 const JOIN_HELP_MS = 10_000;
-const KEYS_HELP = 'In game: <b>WASD</b> move · <b>Shift</b> sprint · mouse look · <b>Space</b> jump · <b>1–9,0</b> hotbar · left-click break/attack · right-click place · <b>E</b> use block · <b>F</b> eat · <b>C</b> character · <b>I</b> inventory · <b>B</b> studio · <b>Esc</b> menu';
+const KEYS_HELP = 'In game: <b>WASD</b> move · <b>Shift</b> sprint · mouse look · <b>Space</b> jump · <b>1–9,0</b> hotbar · left-click break/attack · right-click place · <b>E</b> use block · <b>F</b> eat · <b>C</b> character · <b>I</b> inventory · <b>B</b> studio · <b>+</b> admin settings · <b>Backspace</b> third person · <b>Esc</b> menu';
 $("join-help").innerHTML = KEYS_HELP;
 $("instructions-body").innerHTML = KEYS_HELP;
 let joinHelpTimer = null;
@@ -1303,12 +1604,15 @@ function openInstructions() { $("instructions-dialog").showModal(); }
 $("mm-instructions").addEventListener("click", openInstructions);
 $("pause-instructions").addEventListener("click", openInstructions);
 
+// A session-less tab still must not share a spawn column with another one.
+const guestSeed = "guest-" + Math.random().toString(36).slice(2, 10);
+
 async function initGameView(){
   if(!window.WebGLRenderingContext)throw new Error("WebGL unavailable in this browser");
   showJoinHelp();
   let spawn=null;
   try{
-    const r=await api("/api/player/state");
+    const r=await api(`/api/player/state?server=${encodeURIComponent(settings.serverId)}`);
     spawn=r.state;
     if(r.appearance)appearance={...DEFAULT_APPEARANCE,...r.appearance};
   }catch{/* default spawn on surface */}
@@ -1316,9 +1620,22 @@ async function initGameView(){
     settings:viewSettings(),
     cellAt:(x,y,z)=>cellBlock(x,y,z),
     spawn:spawn||undefined,
+    // No saved position: pick a spawn column of our own so two players who
+    // join at the same moment do not stand inside each other (and an account
+    // without a session still gets a column to itself).
+    spawnSeed:username?String(username).toLowerCase():guestSeed,
   });
   // Beams were fetched before the view existed; paint them now.
   for(const b of worldBeams)if(b&&b.colour)dveView.setBeam(b.x,b.y,b.z,b.colour);
+  // Third person needs a body coloured like the account, before the player
+  // ever presses the key — and it holds whatever is selected.
+  dveView.setSelfAppearance(appearance);
+  dveView.setSelfHeld(heldColour(selectedItem),iconUrl(selectedItem));
+  paintHeldHud();
+  // The clock usually arrives before this view exists (the socket opens first),
+  // so the sky is dialled here too rather than waiting for the next change.
+  if(worldClock)dveView.setClock(worldClock.phase,worldClock.running);
+  void syncClock();
   $("game-loading-text").hidden=true;
   syncLoadingOverlay();
   // The object owns the number: it revives a player whose stored row says 0
@@ -1341,7 +1658,7 @@ function startStateSaver(){
     const key=`${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}`;
     if(key===lastSavedPose)return;
     lastSavedPose=key;
-    try{await api("/api/player/state",{method:"POST",body:JSON.stringify({x:p.x,y:p.y,z:p.z,yaw:p.yaw,pitch:p.pitch})});}catch{/* retried next tick */}
+    try{await api("/api/player/state",{method:"POST",body:JSON.stringify(srvBody({x:p.x,y:p.y,z:p.z,yaw:p.yaw,pitch:p.pitch}))});}catch{/* retried next tick */}
   },2000);
 }
 function failGame(err){
@@ -1415,6 +1732,12 @@ document.addEventListener("keydown",e=>{
   if(e.key==="b"||e.key==="B"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();$("studio-dialog").showModal();return;}
   if(e.key==="f"||e.key==="F"){e.preventDefault();eatSelected();return;}
   if(e.key==="e"||e.key==="E"){e.preventDefault();interactUnderCrosshair();return;}
+  // Backspace would otherwise walk the tab back through history.
+  if(e.key==="Backspace"){e.preventDefault();toggleThirdPerson();return;}
+  // Admin settings: "+" is Shift+"=" on a standard keyboard, so both are the
+  // same door. Only the admin account has a door: for anyone else the key does
+  // nothing at all, and the Worker refuses the requests behind it anyway.
+  if(e.key==="+"||e.key==="="){e.preventDefault();if(openAdminPanel()&&document.pointerLockElement)document.exitPointerLock();return;}
   // Ten hotbar slots: 1-9 then 0 for the tenth.
   if(/^Digit[0-9]$/.test(e.code)){
     const slot=e.code==="Digit0"?9:Number(e.code.slice(5))-1;
@@ -1432,9 +1755,13 @@ async function boot(){
   updateAccountChip();
   restoreSession();
   connectLive();
-  $("mm-join").textContent = settings.server === "local" && isLocalPage ? "Join local server" : "Join global server";
+  updateJoinLabel();
+  void refreshServers();
   $("main-menu").addEventListener("cancel", e => e.preventDefault()); // landing stays until Join
   $("mm-join").addEventListener("click", async () => {
+    // The landing is where you sign in now, so a Join press by a signed-out
+    // player must ask for the session instead of opening an empty world.
+    if(!authenticated){openAuth("login");toast("Log in first — the world remembers where you stand.");return;}
     $("main-menu").close();
     $("game").hidden = false;
     if (dveView) {           // returning from the game to the menu and back
@@ -1454,6 +1781,21 @@ async function boot(){
       await initGameView();
       dveView.grabPointer();        // cursor goes to the game (user gesture)
     } catch (err) {
+      // A private or LAN world answers 403 when this device does not qualify;
+      // say which and fall back to the shared world instead of an empty one.
+      if (err.status === 403 && settings.serverId !== "global") {
+        toast(err.message === "lan" ? "That world only lets devices on its local network in — back to the global world." : "That world is private to the device that made it — back to the global world.", true);
+        settings.serverId = "global";
+        saveSettings();
+        renderServerPicker();
+        try {
+          await refreshRegistry();
+          await loadWorldAll();
+          await initGameView();
+          dveView.grabPointer();
+          return;
+        } catch { /* the shared world failed too */ }
+      }
       failGame(err);
       $("game").hidden = true;
       $("main-menu").showModal();
