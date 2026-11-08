@@ -4,13 +4,20 @@
 const $ = (id) => document.getElementById(id);
 
 // ---- Settings + server selection ------------------------------------------------
-const DEFAULT_SETTINGS = { server: "global", sens: 5, fov: 80, distance: 900, speed: 8 };
+// `render` is the whole look switch: "flat" paints every block its registry
+// colour and shows colour swatches for items; "detailed" uses the textures,
+// 3D models and item icons an author published. Changing it re-takes effect on
+// the next Join (vlox textures are compiled when the world is created).
+const DEFAULT_SETTINGS = { server: "global", sens: 5, fov: 80, distance: 900, speed: 8, render: "flat" };
+// Ten quick-select slots: keys 1-9 then 0.
+const HOTBAR_SLOTS = 10;
 let settings = { ...DEFAULT_SETTINGS };
 try {
   const raw = JSON.parse(localStorage.getItem("ac_settings") || "{}");
   if (raw && typeof raw === "object") settings = { ...settings, ...raw };
 } catch { /* defaults */ }
 if (!["global", "local"].includes(settings.server)) settings.server = "global";
+if (!["flat", "detailed"].includes(settings.render)) settings.render = "flat";
 delete settings.mode; delete settings.flySpeed; // legacy keys from older builds
 function saveSettings() { localStorage.setItem("ac_settings", JSON.stringify(settings)); }
 const isLocalPage = ["localhost", "127.0.0.1"].includes(location.hostname);
@@ -30,6 +37,7 @@ const viewSettings = () => ({
   fov: settings.fov * Math.PI / 180 * 0.72,
   renderDistance: settings.distance,
   speed: settings.speed,
+  render: settings.render,
 });
 
 let username = localStorage.getItem("ac_username");
@@ -49,7 +57,9 @@ let currentRecipes = [];
 let inventory = {};
 let selectedItem = null;
 // Health is server-owned (the WorldLive object applies mob damage and writes
-// player_state.health); this is the mirror the HUD renders. 0 = dead.
+// player_state.health); this is the mirror the HUD renders. 0 = dead. The object
+// also sends a health frame when a socket's stored health is first loaded, so a
+// join never starts from a guessed number.
 const MAX_HEALTH = 20;
 let health = MAX_HEALTH;
 let dead = false;
@@ -141,12 +151,14 @@ function updateAccountChip(){
   $("mm-account-chip").textContent = label;
   $("pause-account").textContent = authenticated && username ? "Account" : "Log in / Register";
 }
-// "Add test items" is an admin-only tool; the form stays hidden for everyone
-// else (the handler also refuses, so a stale DOM cannot be used).
-function isAdmin(){return authenticated&&String(username||"").toLowerCase()==="admin";}
+// The admin account is literally named "admin" — that exact username is the
+// whole role. Inventory surgery (test items, −1, clear) is admin-only and the
+// Worker enforces the same rule, so a tampered DOM cannot reach it.
+function isAdmin(){return authenticated&&String(username||"") === "admin";}
 function renderAdminTools(){
   $("add-item-form").hidden=!isAdmin();
   $("add-item-note").hidden=!isAdmin();
+  $("clear-inventory-button").hidden=!isAdmin();
 }
 // Health bar: ten hearts, half hearts allowed (health is 0..20 server units).
 function renderHealth(){
@@ -154,7 +166,9 @@ function renderHealth(){
   if(!hearts)return;
   const full=Math.floor(health/2), half=health-full*2>=1?1:0;
   let out='<span class="hud-health-label">♥</span>';
-  for(let i=0;i<10;i++)out+=`<span class="heart ${i<full?"full":i===full&&half?"half":"empty"}"></span>`;
+  // "bare" not "empty": the generic .empty placeholder rule (padding, dashed
+  // border) would otherwise inflate the unfilled hearts' border box.
+  for(let i=0;i<10;i++)out+=`<span class="heart ${i<full?"full":i===full&&half?"half":"bare"}"></span>`;
   hearts.innerHTML=out;
   hearts.hidden=!dveView;
 }
@@ -303,6 +317,7 @@ async function refreshRegistry(){
   try{
     const [blocks,items,recipes]=await Promise.all([api("/api/blocks"),api("/api/items"),api("/api/recipes")]);
     setConnection(true);
+    setModelOptions(blocks.models);
     currentBlocks=Array.isArray(blocks.blocks)?blocks.blocks:[];
     currentItems=Array.isArray(items.items)?items.items:[];
     currentRecipes=Array.isArray(recipes.recipes)?recipes.recipes:[];
@@ -375,35 +390,107 @@ function selectItem(id){
   $("hud-held").textContent=meta?`${meta.name}${KIND_LABEL[meta.kind]?` · ${KIND_LABEL[meta.kind]}`:""}`:(id||"no item");
 }
 function renderInventory(){
-  const entries=Object.entries(inventory).sort(([a],[b])=>a.localeCompare(b));
+  // The server returns the player's own arrangement (see /api/inventory), so
+  // this list IS the order — the hotbar is just its first ten.
+  const entries=Object.entries(inventory);
   const total=entries.reduce((sum,[,quantity])=>sum+quantity,0);
   $("inventory-total").textContent=`${total} item${total===1?"":"s"}`;
   renderHotbar();
+  // Inventory tools (−1, clear) are admin-only; the server enforces the same
+  // rule, this only keeps the controls out of a player's way.
+  $("clear-inventory-button").hidden=!isAdmin();
   if(!entries.length){$("inventory-list").innerHTML=`<div class="empty">${authenticated?"Your inventory is empty. Break blocks in the world or add items above.":"Log in — your inventory lives on your account."}</div>`;return;}
   $("inventory-list").innerHTML=entries.map(([id,quantity])=>{
     const meta=itemMeta(id);const label=meta?meta.name:id;const colour=meta&&/^#[0-9a-f]{6}$/i.test(meta.colour)?meta.colour:"#64748b";
     const selected=id===selectedItem?" selected":"";
     const kind=meta?KIND_LABEL[meta.kind]||meta.kind:"unknown";
     const stats=meta?itemStatLine(meta):"not in the registry — it cannot be placed or used";
-    return `<div class="inventory-item${selected}" data-item-id="${escapeAttr(id)}"><span class="swatch" style="background:${escapeAttr(colour)}"></span><div class="item-info"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(id)}</small><small class="item-kind kind-${escapeAttr(kind)}">${escapeHtml(kind)}</small>${stats?`<small class="item-stats">${escapeHtml(stats)}</small>`:""}</div><span class="item-quantity">×${quantity}</span><button class="remove-item" type="button" data-remove-item="${escapeAttr(id)}" aria-label="Remove one ${escapeAttr(id)}">−1</button></div>`;
+    return `<div class="inventory-item${selected}" data-item-id="${escapeAttr(id)}" draggable="true" title="Drag to arrange">${itemFace(meta,colour)}<div class="item-info"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(id)}</small><small class="item-kind kind-${escapeAttr(kind)}">${escapeHtml(kind)}</small>${stats?`<small class="item-stats">${escapeHtml(stats)}</small>`:""}</div><span class="item-quantity">×${quantity}</span>${isAdmin()?`<button class="remove-item" type="button" data-remove-item="${escapeAttr(id)}" aria-label="Remove one ${escapeAttr(id)}">−1</button>`:""}</div>`;
   }).join("");
 }
 
-// Hotbar: first nine stacks, selectable with 1–9 or a click while in game.
+// An item's face: the uploaded icon when the player asked for icons, otherwise
+// the registry colour swatch. Same switch as the world's flat-vs-textured look.
+// Registry pictures are validated server-side to exactly this shape, so they
+// can go straight into an attribute — escapeAttr strips ';', which would
+// corrupt the data URL itself.
+const SAFE_IMAGE=/^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
+function itemFace(meta,colour){
+  const icon=meta&&SAFE_IMAGE.test(meta.icon||"");
+  return icon&&settings.render==="detailed"
+    ? `<img class="item-icon" src="${meta.icon}" alt="">`
+    : `<span class="swatch" style="background:${escapeAttr(colour)}"></span>`;
+}
+
+// Hotbar: the first ten stacks in the player's own arrangement, selectable
+// with 1-9 then 0 (0 is the tenth) or a click, and rearranged by dragging.
 function renderHotbar(){
-  const entries=Object.entries(inventory).sort(([a],[b])=>a.localeCompare(b)).slice(0,9);
+  const entries=Object.entries(inventory).slice(0,HOTBAR_SLOTS);
   $("hotbar").innerHTML=entries.map(([id,quantity],i)=>{
     const meta=itemMeta(id);const colour=meta&&/^#[0-9a-f]{6}$/i.test(meta.colour)?meta.colour:"#64748b";
     const selected=id===selectedItem?" hotbar-selected":"";
     const glyph=meta&&meta.kind==="weapon"?"⚔":meta&&meta.kind==="tool"?"⛏":meta&&meta.kind==="food"?"✚":"";
     const label=meta?`${meta.name} — ${id}`:id;
-    return `<div class="hotbar-slot${selected}" data-slot-id="${escapeAttr(id)}" title="${escapeAttr(label)}"><span class="hotbar-key">${i+1}</span><span class="swatch" style="background:${escapeAttr(colour)}"></span>${glyph?`<span class="hotbar-glyph">${glyph}</span>`:""}<span class="hotbar-qty">${quantity}</span></div>`;
+    return `<div class="hotbar-slot${selected}" data-slot-id="${escapeAttr(id)}" draggable="true" title="${escapeAttr(label)}"><span class="hotbar-key">${(i+1)%10}</span>${itemFace(meta,colour)}${glyph?`<span class="hotbar-glyph">${glyph}</span>`:""}<span class="hotbar-qty">${quantity}</span></div>`;
   }).join("");
 }
 $("hotbar").addEventListener("click",e=>{
   const slot=e.target.closest("[data-slot-id]");
   if(slot)selectItem(slot.dataset.slotId===selectedItem?null:slot.dataset.slotId);
 });
+
+// ---- Drag to arrange ------------------------------------------------------
+// One order, one gesture: bag cards and hotbar slots are the same list (the
+// hotbar is its first ten), so a drag from either rearranges both. Dropping
+// one stack on another swaps their places — predictable in a grid and in a
+// fixed hotbar alike, and it keeps the hotbar's contents count stable.
+let dragId=null;
+function dropTarget(e){return e.target.closest?.("[data-item-id],[data-slot-id]");}
+function clearDragMarks(){
+  for(const el of document.querySelectorAll(".dragging,.drop-target"))el.classList.remove("dragging","drop-target");
+}
+async function swapStacks(a,b){
+  const ids=Object.keys(inventory);
+  const i=ids.indexOf(a),j=ids.indexOf(b);
+  if(i<0||j<0||i===j)return;
+  [ids[i],ids[j]]=[ids[j],ids[i]];
+  // The object's key order IS the arrangement, so rebuild it in the new order.
+  const next={};
+  for(const key of ids)next[key]=inventory[key];
+  inventory=next;
+  renderInventory();renderCrafting();
+  try{await api("/api/inventory/order",{method:"POST",body:JSON.stringify({ids})});}
+  catch(error){toast(error.message,true);refreshInventory();}
+}
+for(const root of [$("inventory-list"),$("hotbar")]){
+  root.addEventListener("dragstart",e=>{
+    const el=dropTarget(e);
+    if(!el){e.preventDefault();return;}
+    dragId=el.dataset.itemId||el.dataset.slotId;
+    el.classList.add("dragging");
+    e.dataTransfer.effectAllowed="move";
+    e.dataTransfer.setData("text/plain",dragId);
+  });
+  root.addEventListener("dragend",clearDragMarks);
+  root.addEventListener("dragover",e=>{
+    const el=dropTarget(e);
+    if(!el||!dragId)return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect="move";
+    el.classList.add("drop-target");
+  });
+  root.addEventListener("dragleave",e=>{dropTarget(e)?.classList.remove("drop-target");});
+  root.addEventListener("drop",e=>{
+    const el=dropTarget(e);
+    if(!el||!dragId)return;
+    e.preventDefault();
+    const target=el.dataset.itemId||el.dataset.slotId;
+    clearDragMarks();
+    const id=dragId;
+    dragId=null;
+    swapStacks(id,target);
+  });
+}
 
 // Recipe ingredients are an array of IDs. Duplicate IDs represent multiple units.
 function ingredientRequirements(ingredients){
@@ -442,12 +529,72 @@ $("crafting-list").addEventListener("click",async e=>{
 });
 
 // ---- Block workshop: publish, edit (own blocks), delete (own blocks) ----------
+// Reads an uploaded picture and resamples it to the size the game actually
+// draws at (16x16 for a block face, 32x32 for an item icon), centred square
+// crop, nearest neighbour so pixel art stays crisp. Small data URLs keep the
+// registry payload every player downloads on join tiny.
+function readImageFile(file, size){
+  return new Promise((resolve,reject)=>{
+    if(!file){resolve(null);return;}
+    if(!/^image\//.test(file.type)){reject(new Error("Pick a PNG or JPEG image."));return;}
+    const url=URL.createObjectURL(file);
+    const img=new Image();
+    img.onload=()=>{
+      URL.revokeObjectURL(url);
+      const canvas=document.createElement("canvas");canvas.width=size;canvas.height=size;
+      const ctx=canvas.getContext("2d");
+      ctx.imageSmoothingEnabled=false;
+      const side=Math.min(img.width,img.height);
+      ctx.drawImage(img,(img.width-side)/2,(img.height-side)/2,side,side,0,0,size,size);
+      resolve(canvas.toDataURL("image/png"));
+    };
+    img.onerror=()=>{URL.revokeObjectURL(url);reject(new Error("That image could not be read."));};
+    img.src=url;
+  });
+}
+
+// One file input + preview + clear button. Picking a file stores the data URL
+// and shows it; clear drops it back to "no image published".
+function wireImageField(inputId,previewId,clearId,size){
+  const input=$(inputId),preview=$(previewId),clear=$(clearId);
+  let value=null;
+  const paint=()=>{
+    preview.src=value||"";
+    preview.hidden=!value;
+    clear.hidden=!value;
+    input.value="";
+  };
+  input.addEventListener("change",async()=>{
+    try{value=await readImageFile(input.files[0],size);paint();}
+    catch(err){toast(err.message,true);input.value="";}
+  });
+  clear.addEventListener("click",()=>{value=null;paint();});
+  return { value:()=>value, set:v=>{value=v||null;paint();} };
+}
+// The extra parts a block can publish: a 16x16 texture, one of the shipped
+// voxel models, and an optional Lua script. The model list comes from the
+// Worker, so the dropdown can only ever offer what the renderer understands.
+const blockTextureField=wireImageField("block-texture","block-texture-preview","block-texture-clear",16);
+const itemIconField=wireImageField("item-icon","item-icon-preview","item-icon-clear",32);
+function resetBlockAppearance(){
+  blockTextureField.set(null);
+  $("block-model").value="";$("block-script").value="";
+}
+function modelLabel(model){
+  return model.replace(/^dve_/,"").replace(/_/g," ").replace(/\b[a-z]/g,c=>c.toUpperCase());
+}
+function setModelOptions(models){
+  const list=Array.isArray(models)?models:[];
+  $("block-model").innerHTML='<option value="">Full cube (default)</option>'+
+    list.map(m=>`<option value="${escapeAttr(m)}">${escapeHtml(modelLabel(m))}</option>`).join("");
+}
 let editingBlockId=null;
 const pendingDelete=new Set();
 $("block-form").addEventListener("submit",async e=>{
   e.preventDefault();if(!authenticated){openAuth("login");toast("Log in to publish a block.");return;}
   const rules={support:$("block-support").value,incompatibleWith:$("block-incompatible").value.split(",").map(x=>x.trim().toLowerCase()).filter(Boolean)};
-  const common={name:$("block-name").value,hardness:Number($("block-hardness").value),light:Number($("block-light").value),colour:$("block-colour").value,behaviour:$("block-behaviour").value,rules};
+  const common={name:$("block-name").value,hardness:Number($("block-hardness").value),light:Number($("block-light").value),colour:$("block-colour").value,behaviour:$("block-behaviour").value,rules,
+    texture:blockTextureField.value(),model:$("block-model").value||null,script:$("block-script").value.trim()||null};
   try{
     if(editingBlockId){
       await api(`/api/blocks/${encodeURIComponent(editingBlockId)}`,{method:"PUT",body:JSON.stringify(common)});
@@ -456,7 +603,7 @@ $("block-form").addEventListener("submit",async e=>{
     }else{
       await api("/api/blocks",{method:"POST",body:JSON.stringify({...common,namespace:$("block-namespace").value,id:$("block-id").value})});
       toast("Block published to the registry. It becomes placeable immediately; textures reload on next visit.");
-      e.target.reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";updateIdPreview();
+      e.target.reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";resetBlockAppearance();updateIdPreview();
     }
     await refreshRegistry();
   }
@@ -468,11 +615,13 @@ function enterEditMode(block){
   const parts=block.id.split(":");
   const namespace=block.id.startsWith("player:")?parts[2]:"";
   const localId=block.id.startsWith("player:")?parts.slice(3).join(":"):block.id;
-  let rules={};try{rules=JSON.parse(block.rules_json||"{}");}catch{/* defaults below */}
+  const rules=block.rules&&typeof block.rules==="object"?block.rules:{};
   $("block-name").value=block.name;$("block-namespace").value=namespace;$("block-id").value=localId;
   $("block-hardness").value=block.hardness;$("block-light").value=block.light;$("block-colour").value=block.colour;
   $("block-behaviour").value=block.behaviour;$("block-support").value=rules.support||"solid";
   $("block-incompatible").value=(rules.incompatibleWith||[]).join(", ");
+  blockTextureField.set(block.texture||null);
+  $("block-model").value=block.model||"";$("block-script").value=block.script||"";
   $("block-namespace").readOnly=true;$("block-id").readOnly=true;
   $("block-edit-note").hidden=false;$("block-edit-id").textContent=block.id;
   $("block-form-title").textContent="Edit block";$("block-form-sub").textContent="Changes apply to the live registry.";
@@ -485,7 +634,7 @@ function exitEditMode(){
   $("block-edit-note").hidden=true;
   $("block-form-title").textContent="Block workshop";$("block-form-sub").textContent="Design a new block";
   $("block-submit").innerHTML='Publish block <span>＋</span>';
-  $("block-form").reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";updateIdPreview();
+  $("block-form").reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";resetBlockAppearance();updateIdPreview();
 }
 // Live registry-ID preview: player:USERNAME:NAMESPACE:BLOCKNAME.
 function updateIdPreview(){
@@ -504,7 +653,7 @@ function renderMyBlocks(){
   if(!mine.length){list.innerHTML='<div class="empty">You have not published any blocks yet.</div>';return;}
   list.innerHTML=mine.map(b=>{
     const pending=pendingDelete.has(b.id);
-    return `<div class="registry-item"><span class="swatch" style="background:${escapeAttr(b.colour)}"></span><div class="item-info"><strong>${escapeHtml(b.name)}</strong><small>${escapeHtml(b.id)} · ${escapeHtml(b.behaviour)} · light ${Number(b.light)||0}</small></div><div class="my-block-actions"><button class="button button-outline" type="button" data-mb-edit="${escapeAttr(b.id)}">Edit</button><button class="button ${pending?"button-danger":"button-outline"}" type="button" data-mb-del="${escapeAttr(b.id)}">${pending?"Really delete?":"Delete"}</button></div></div>`;
+    return `<div class="registry-item">${swatchHtml(b.colour,b.texture)}<div class="item-info"><strong>${escapeHtml(b.name)}</strong><small>${escapeHtml(b.id)} · ${escapeHtml(b.behaviour)} · light ${Number(b.light)||0}${b.script?" · scripted":""}</small></div><div class="my-block-actions"><button class="button button-outline" type="button" data-mb-edit="${escapeAttr(b.id)}">Edit</button><button class="button ${pending?"button-danger":"button-outline"}" type="button" data-mb-del="${escapeAttr(b.id)}">${pending?"Really delete?":"Delete"}</button></div></div>`;
   }).join("");
 }
 $("my-blocks-list").addEventListener("click",async e=>{
@@ -573,6 +722,7 @@ $("item-form").addEventListener("submit",async e=>{
     speed:Number($("item-speed").value)||1,
     heal:Number($("item-heal").value)||0,
     durability:Number($("item-durability").value)||0,
+    icon:itemIconField.value(),
   };
   if(kind==="block"&&!body.place_block_id){toast("Pick the block this item places.",true);return;}
   try{
@@ -585,6 +735,7 @@ $("item-form").addEventListener("submit",async e=>{
       toast("Item published. Craft or obtain it, then use it in the world.");
       e.target.reset();$("item-colour").value="#c9a35f";$("item-kind").value="block";$("item-speed").value=1;
       $("item-damage").value=0;$("item-heal").value=0;$("item-durability").value=0;
+      itemIconField.set(null);
       updateItemFormKind();updateItemIdPreview();
     }
     await refreshRegistry();
@@ -605,6 +756,7 @@ function enterItemEdit(item){
   $("item-damage").value=Number(item.damage)||0;$("item-speed").value=Number(item.speed)||1;
   $("item-heal").value=Number(item.heal)||0;$("item-durability").value=Number(item.durability)||0;
   $("item-colour").value=/^#[0-9a-f]{6}$/i.test(item.colour)?item.colour:"#c9a35f";
+  itemIconField.set(item.icon||null);
   updateItemFormKind();
   $("item-namespace").readOnly=true;$("item-id").readOnly=true;
   $("item-edit-note").hidden=false;$("item-edit-id").textContent=item.id;
@@ -619,9 +771,16 @@ function exitItemEdit(){
   $("item-form").reset();
   $("item-colour").value="#c9a35f";$("item-kind").value="block";$("item-speed").value=1;
   $("item-damage").value=0;$("item-heal").value=0;$("item-durability").value=0;
+  itemIconField.set(null);
   updateItemFormKind();updateItemIdPreview();
 }
 $("item-edit-cancel").addEventListener("click",exitItemEdit);
+// The Studio list swatch: the published picture when there is one, otherwise
+// the flat colour it falls back to.
+function swatchHtml(colour,image){
+  return image&&SAFE_IMAGE.test(image)?`<span class="swatch"><img class="pixel-art" src="${image}" alt=""></span>`
+    :`<span class="swatch" style="background:${escapeAttr(colour)}"></span>`;
+}
 function renderMyItems(){
   const list=$("my-items-list");
   if(!authenticated){list.innerHTML='<div class="empty">Log in to manage your own items.</div>';return;}
@@ -630,7 +789,7 @@ function renderMyItems(){
   list.innerHTML=mine.map(it=>{
     const pending=pendingItemDelete.has(it.id);
     const stats=itemStatLine(it);
-    return `<div class="registry-item"><span class="swatch" style="background:${escapeAttr(it.colour)}"></span><div class="item-info"><strong>${escapeHtml(it.name)}</strong><small>${escapeHtml(it.id)} · ${escapeHtml(KIND_LABEL[it.kind]||it.kind)}${stats?` · ${escapeHtml(stats)}`:""}</small></div><div class="my-block-actions"><button class="button button-outline" type="button" data-mi-edit="${escapeAttr(it.id)}">Edit</button><button class="button ${pending?"button-danger":"button-outline"}" type="button" data-mi-del="${escapeAttr(it.id)}">${pending?"Really delete?":"Delete"}</button></div></div>`;
+    return `<div class="registry-item">${swatchHtml(it.colour,it.icon)}<div class="item-info"><strong>${escapeHtml(it.name)}</strong><small>${escapeHtml(it.id)} · ${escapeHtml(KIND_LABEL[it.kind]||it.kind)}${stats?` · ${escapeHtml(stats)}`:""}</small></div><div class="my-block-actions"><button class="button button-outline" type="button" data-mi-edit="${escapeAttr(it.id)}">Edit</button><button class="button ${pending?"button-danger":"button-outline"}" type="button" data-mi-del="${escapeAttr(it.id)}">${pending?"Really delete?":"Delete"}</button></div></div>`;
   }).join("");
 }
 $("my-items-list").addEventListener("click",async e=>{
@@ -730,6 +889,7 @@ function syncSettingsInputs(){
   $("set-fov").value=settings.fov;$("set-fov-out").textContent=settings.fov+"°";
   $("set-distance").value=settings.distance;$("set-distance-out").textContent=settings.distance;
   $("set-speed").value=settings.speed;$("set-speed-out").textContent=settings.speed;
+  $("set-render").value=settings.render;
 }
 
 // ---- Pause menu ---------------------------------------------------------------
@@ -752,6 +912,13 @@ $("pause-mainmenu").addEventListener("click",()=>{
 $("pause-inventory").addEventListener("click",openInventoryDialog);
 $("pause-studio").addEventListener("click",()=>$("studio-dialog").showModal());
 $("hud-menu").addEventListener("click",openPause);
+// Look changes the block/item artwork, which the world compiles when it is
+// created — so it applies on the next join, not mid-world.
+$("set-render").addEventListener("change",()=>{
+  settings.render=$("set-render").value==="detailed"?"detailed":"flat";
+  saveSettings();
+  toast(`Look: ${settings.render==="detailed"?"textures and models":"flat colours"}. Leave and rejoin to see it.`);
+});
 [["set-sensitivity","sens"],["set-fov","fov"],["set-distance","distance"],["set-speed","speed"]].forEach(([id,key])=>{
   $(id).addEventListener("input",()=>{
     settings[key]=Number($(id).value);saveSettings();
@@ -833,6 +1000,7 @@ grabBtn.addEventListener("click",()=>{if(dveView)dveView.grabPointer();});
 // camera and live WS echo see the same state.
 const worldEdits=new Map();
 let headSeq=0,ws=null,wsRetry=0,dveView=null,dveMod=null;
+let worldBeams=[];
 const lastWsFailed=()=>ws&&(ws.readyState===2||ws.readyState===3);
 function cellBlock(x,y,z){const o=worldEdits.get(`${x},${y},${z}`);return o!==undefined?o:dveMod.baseBlock(x,y,z);}
 // Single funnel for world edits: paint the voxel in the 3D view.
@@ -846,6 +1014,10 @@ async function loadWorldAll(){
     const data=await api(`/api/world?x0=${S.X0}&y0=${S.Y0}&z0=${S.Z0}&x1=${S.X1-1}&y1=${S.Y1-1}&z1=${S.Z1-1}&since=${headSeq}`);
     for(const edit of data.edits)noteEdit(edit.x,edit.y,edit.z,edit.block_id);
     for(const entry of data.log)noteEdit(entry.x,entry.y,entry.z,entry.block_id);
+    // Light columns switched on by scripted blocks: cached because this runs
+    // before the view exists on first join, then replayed into it.
+    worldBeams=Array.isArray(data.beams)?data.beams:[];
+    if(dveView)for(const b of worldBeams)dveView.setBeam(b.x,b.y,b.z,b.colour);
     headSeq=Math.max(headSeq,data.head);
     setConnection(true);
   }catch{setConnection(false);}
@@ -855,10 +1027,19 @@ function connectLive(){
   ws.onopen=()=>{wsRetry=0;setConnection(true);sendPresence(true);};
   ws.onmessage=event=>{try{const m=JSON.parse(event.data);
     if(m.type==="edit")noteEdit(m.x,m.y,m.z,m.block_id);
-    else if(m.type==="roster"){for(const p of m.players||[])if(dveView&&p.name!==username)dveView.setRemote(p.name,p.x,p.y,p.z,p.yaw,p.appearance,p.vx,p.vy,p.vz);}
-    else if(m.type==="pose"&&dveView&&m.name!==username)dveView.setRemote(m.name,m.x,m.y,m.z,m.yaw,m.appearance,m.vx,m.vy,m.vz);
+    else if(m.type==="roster"){for(const p of m.players||[])if(dveView&&p.name!==username)dveView.setRemote(p);}
+    else if(m.type==="pose"&&dveView&&m.name!==username)dveView.setRemote(m);
     else if(m.type==="leave"&&dveView)dveView.removeRemote(m.name);
     else if(m.type==="mobs"&&dveView)applyMobSnapshot(m.mobs||[]);
+    // A body was just struck: flash it white on every screen, including for the
+    // attacker, so a swing that connected is obvious without a health bar.
+    else if(m.type==="hit"&&dveView){
+      if(m.what==="mob")dveView.flashMob(m.id);
+      else if(m.id!==username)dveView.flashPlayer(m.id);
+    }
+    else if(m.type==="down"&&dveView)dveView.setDown(m.name,true);
+    else if(m.type==="up"&&dveView)dveView.setDown(m.name,false);
+    else if(m.type==="beam"&&dveView)dveView.setBeam(m.x,m.y,m.z,m.colour||null);
     else if(m.type==="health")applyHealth(m);
     else if(m.type==="hurt")applyHealth(m);
     else if(m.type==="died")applyDeath(m);
@@ -883,18 +1064,25 @@ function sendPresence(force){
   }
   lastPose={t:now,x:p.x,y:p.y,z:p.z};
   presenceAt=now;
-  try{ws.send(JSON.stringify({type:"pose",name:username||"someone",x:p.x,y:p.y,z:p.z,yaw:p.yaw,appearance,vx,vy,vz}));}catch{/* racing a close */}
+  // `pitch` tilts other players' heads; `held` is the colour of the item in
+  // hand, so you can tell who is holding a pick, a sword or nothing.
+  const meta=selectedItem?itemMeta(selectedItem):null;
+  const held=meta&&/^#[0-9a-f]{6}$/i.test(String(meta.colour||""))?meta.colour:null;
+  try{ws.send(JSON.stringify({type:"pose",name:username||"someone",x:p.x,y:p.y,z:p.z,yaw:p.yaw,pitch:p.pitch,held,appearance,vx,vy,vz}));}catch{/* racing a close */}
 }
 setInterval(sendPresence,250);
 
 // ---- Mobs + health ------------------------------------------------------------
 // The WorldLive object simulates mobs and owns health; this client renders the
 // snapshot and reports attacks. `mobs` arrives ~4 Hz with the full live list.
+// The kinds the world object spawns; a `died` frame naming one of these came
+// from a mob, anything else is a player's username.
+const MOB_KINDS=new Set(["zombie","pig","slime"]);
 function applyMobSnapshot(list){
   const seen=new Set();
   for(const mob of list){
     seen.add(mob.id);
-    dveView.setMob(mob.id,mob.kind||"slime",Number(mob.x)||0,Number(mob.y)||0,Number(mob.z)||0,Number(mob.yaw)||0,mob.hostile===true);
+    dveView.setMob(mob.id,mob.kind||"slime",Number(mob.x)||0,Number(mob.y)||0,Number(mob.z)||0,Number(mob.yaw)||0,mob.hostile===true,Number(mob.hp));
   }
   for(const id of mobSnapshot.keys())if(!seen.has(id)){dveView.removeMob(id);mobSnapshot.delete(id);}
   for(const mob of list)mobSnapshot.set(mob.id,mob);
@@ -913,7 +1101,11 @@ function applyHealth(m){
 function applyDeath(m){
   health=0;
   renderHealth();
-  if(!dead)showDeath(m&&m.by?`A ${String(m.by).replace(/_/g," ")} got you.`:null);
+  // `by` is a mob kind when the world object killed you, and the attacker's
+  // username when another player did.
+  const by=m&&m.by?String(m.by):"";
+  const cause=by?(MOB_KINDS.has(by)?`A ${by.replace(/_/g," ")} got you.`:`${by} got you.`):null;
+  showDeath(cause);
 }
 function applyRespawn(m){
   health=Math.max(1,Math.min(MAX_HEALTH,Number(m.health)||MAX_HEALTH));
@@ -928,19 +1120,66 @@ function flashDamage(){
   void el.offsetWidth; // restart the CSS animation
   el.classList.add("hit");
 }
-// Left-click with a weapon/tool aimed at a mob is an attack, not a block break.
-function attackMobUnderCrosshair(){
-  const meta=selectedItem?itemMeta(selectedItem):null;
-  if(!meta||(meta.kind!=="weapon"&&meta.kind!=="tool"))return false;
-  if(!dveView.pickMob)return false;
+// Left-click aimed at a body is an attack, not a block break. Mobs and other
+// players are both valid targets — whoever the crosshair is nearest. What you
+// hold only changes the damage and reach, and the object decides both: holding
+// nothing swingable punches with your fists.
+function attackUnderCrosshair(){
+  if(!ws||ws.readyState!==1||dead||!dveView)return false;
+  if(!dveView.pickMob||!dveView.pickPlayer)return false;
   const mob=dveView.pickMob();
-  if(!mob)return false;
-  if(ws&&ws.readyState===1){
-    try{ws.send(JSON.stringify({type:"attack",mob_id:mob.id,item_id:selectedItem}));}catch{/* racing a close */}
+  const player=dveView.pickPlayer();
+  if(player&&player.name!==username&&(!mob||player.distance<=mob.distance)){
+    try{ws.send(JSON.stringify({type:"attack",target:player.name,item_id:selectedItem||""}));}catch{/* racing a close */}
     return true;
   }
-  return false;
+  if(!mob)return false;
+  try{ws.send(JSON.stringify({type:"attack",mob_id:mob.id,item_id:selectedItem||""}));}catch{/* racing a close */}
+  return true;
 }
+// ---- Scripted blocks (E) -----------------------------------------------------
+// A block can carry a Lua script (the beacon ships one). E runs the script's
+// `on_interact` on the block under the crosshair: the answer is a toast, a
+// short message, or a menu whose options run `on_choice`. Every rule lives on
+// the Worker; the client only draws what comes back.
+let interactTarget=null;
+async function interactUnderCrosshair(){
+  if(!authenticated){openAuth("login");toast("Log in to use scripted blocks.");return;}
+  if(dead||!dveView)return;
+  let hit=null;
+  try{hit=await dveView.pickCenter();}catch{/* pick failed: nothing to ask */}
+  if(!hit||!hit.position)return;
+  const x=hit.position.x|0,y=hit.position.y|0,z=hit.position.z|0;
+  let r=null;
+  try{r=await api("/api/block/interact",{method:"POST",body:JSON.stringify({x,y,z})});}
+  catch(err){toast(err.message,true);return;}
+  if(!r||r.ok!==true){
+    // Silence is right for an ordinary block ("unscripted") or empty air, but a
+    // script that fails to run is the author's bug: say so, or the player just
+    // presses E on a block that looks dead.
+    if(r&&r.reason==="script-error")toast(`That block's script is broken: ${r.error||"it failed to run"}.`,true);
+    return;
+  }
+  for(const t of (r.toasts||[]))toast(t);
+  if(r.menu&&r.menu.length){
+    interactTarget={x,y,z};
+    $("interact-title").textContent=r.title||String(r.name||"Block");
+    $("interact-options").innerHTML=r.menu.map(o=>`<button class="button button-outline full" type="button" data-choice="${escapeAttr(o.key)}">${escapeHtml(o.label)}</button>`).join("");
+    $("interact-dialog").showModal();
+  }
+}
+$("interact-options").addEventListener("click",async e=>{
+  const b=e.target.closest("[data-choice]");
+  if(!b||!interactTarget)return;
+  const {x,y,z}=interactTarget;
+  $("interact-dialog").close();
+  try{
+    const r=await api("/api/block/interact",{method:"POST",body:JSON.stringify({x,y,z,key:b.dataset.choice})});
+    if(r&&r.reason==="script-error")toast(`That block's script is broken: ${r.error||"it failed to run"}.`,true);
+    for(const t of (r&&r.toasts)||[])toast(t);
+  }catch(err){toast(err.message,true);}
+});
+
 // Food: right-click (or F) with a food item selected eats one unit.
 async function eatSelected(){
   const meta=selectedItem?itemMeta(selectedItem):null;
@@ -980,7 +1219,7 @@ async function worldAction(button,x,y,z){
 // One source for the control brief: the join overlay and the Instructions menu
 // (main menu + pause menu) both render this exact string.
 const JOIN_HELP_MS = 10_000;
-const KEYS_HELP = 'In game: <b>WASD</b> move · <b>Shift</b> sprint · mouse look · <b>Space</b> jump · <b>1–9</b> hotbar · left-click break/attack · right-click place · <b>F</b> eat · <b>C</b> character · <b>I</b> inventory · <b>B</b> studio · <b>Esc</b> menu';
+const KEYS_HELP = 'In game: <b>WASD</b> move · <b>Shift</b> sprint · mouse look · <b>Space</b> jump · <b>1–9,0</b> hotbar · left-click break/attack · right-click place · <b>E</b> use block · <b>F</b> eat · <b>C</b> character · <b>I</b> inventory · <b>B</b> studio · <b>Esc</b> menu';
 $("join-help").innerHTML = KEYS_HELP;
 $("instructions-body").innerHTML = KEYS_HELP;
 let joinHelpTimer = null;
@@ -1010,18 +1249,21 @@ async function initGameView(){
     const r=await api("/api/player/state");
     spawn=r.state;
     if(r.appearance)appearance={...DEFAULT_APPEARANCE,...r.appearance};
-    if(Number.isFinite(Number(r.health))){health=Math.max(0,Math.min(MAX_HEALTH,Number(r.health)));}
   }catch{/* default spawn on surface */}
   dveView=await dveMod.createDVEView($("game-canvas"),currentBlocks,API_BASE,{
     settings:viewSettings(),
     cellAt:(x,y,z)=>cellBlock(x,y,z),
     spawn:spawn||undefined,
   });
+  // Beams were fetched before the view existed; paint them now.
+  for(const b of worldBeams)if(b&&b.colour)dveView.setBeam(b.x,b.y,b.z,b.colour);
   $("game-loading-text").hidden=true;
   syncLoadingOverlay();
-  // A player who left while dead comes back dead: the object already ignores
-  // their pose frames, so the client shows the death screen and parks the body.
-  if(health<=0)applyDeath(null);else hideDeath();
+  // The object owns the number: it revives a player whose stored row says 0
+  // ("a new socket is a new life"), so the client waits for the health frame
+  // instead of reading the stored row and parking the body behind the death
+  // screen for a death the server already overruled.
+  hideDeath();
   renderHealth();
   startStateSaver();
   // Presence: advertise ourselves and pull the current roster of players.
@@ -1069,8 +1311,8 @@ gameCanvas.addEventListener("pointerup",async e=>{
 });
 async function gameAction(button){
   if(dead){toast("You are dead — respawn first.",true);return;}
-  // Left-click aimed at a mob, holding a weapon or tool: attack, don't dig.
-  if(button===2&&attackMobUnderCrosshair())return;
+  // Left-click aimed at a body (mob or player): attack, don't dig.
+  if(button===2&&attackUnderCrosshair())return;
   let hit=null;
   try{hit=await dveView.pickCenter();}catch{/* pick failed: treat as nothing in reach */}
   if(!hit||!hit.position){toast("Nothing in reach — aim the crosshair at a block.",true);return;}
@@ -1110,9 +1352,13 @@ document.addEventListener("keydown",e=>{
   if(e.key==="i"||e.key==="I"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();openInventoryDialog();return;}
   if(e.key==="b"||e.key==="B"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();$("studio-dialog").showModal();return;}
   if(e.key==="f"||e.key==="F"){e.preventDefault();eatSelected();return;}
-  if(/^Digit[1-9]$/.test(e.code)){
-    const entries=Object.entries(inventory).sort(([a],[b])=>a.localeCompare(b)).slice(0,9);
-    const entry=entries[Number(e.code.slice(5))-1];
+  if(e.key==="e"||e.key==="E"){e.preventDefault();interactUnderCrosshair();return;}
+  // Ten hotbar slots: 1-9 then 0 for the tenth.
+  if(/^Digit[0-9]$/.test(e.code)){
+    const slot=e.code==="Digit0"?9:Number(e.code.slice(5))-1;
+    if(slot>=HOTBAR_SLOTS)return;
+    const entries=Object.entries(inventory).slice(0,HOTBAR_SLOTS);
+    const entry=entries[slot];
     if(!entry)return;
     selectItem(entry[0]===selectedItem?null:entry[0]);
   }
@@ -1135,7 +1381,11 @@ async function boot(){
       return;
     }
     try {
-      const { DVE_REV } = await import("./dve/dist/rev.js");
+      // The revision map has to be fresh or every bundle below is requested by
+      // a stale hash and the browser serves an old engine from cache. The map
+      // itself is a few hundred bytes, so bust it per page load and let the
+      // hashed bundles keep their long-lived caching.
+      const { DVE_REV } = await import(`./dve/dist/rev.js?n=${Date.now()}`);
       dveMod = await import(`./dve/dist/dve-view.js?h=${DVE_REV["dve-view.js"]}`);
       await refreshRegistry();      // textures come from the block registry
       await loadWorldAll();         // player edits made before this session

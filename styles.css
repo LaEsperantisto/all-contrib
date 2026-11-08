@@ -15,8 +15,10 @@
 .add-item-row label{margin-bottom:0}
 .add-item-button{margin:0;height:39px;white-space:nowrap}
 .inventory-list-heading{display:flex;justify-content:space-between;margin-top:22px;padding:0 5px 9px;border-bottom:2px solid var(--ink);color:var(--ink2);font:9px 'DM Mono';letter-spacing:.12em}
-.inventory-list,.crafting-list{display:flex;flex-direction:column}
-.inventory-item{display:flex;align-items:center;gap:10px;padding:11px 3px;border-bottom:1px dashed var(--line);min-width:0}
+.crafting-list{display:flex;flex-direction:column}
+/* The bag is a grid of cards so a big inventory stays scannable. */
+.inventory-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:9px}
+.inventory-item{display:flex;align-items:center;gap:10px;padding:10px;border:2px solid var(--ink);border-radius:10px 8px 11px 9px;background:var(--paper2);min-width:0;box-shadow:3px 3px 0 #2e251922}
 .inventory-item .item-info{flex:1}
 .inventory-item .item-info strong{font-size:11px}
 .inventory-item .item-info small{font:9px 'DM Mono'}
@@ -144,3 +146,30 @@
 .item-program select{width:100%}
 #item-stats{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}
 #item-stats label[hidden]{display:none}
+/* Published artwork: icons and textures are pixel art, so scaling keeps the
+   pixels square instead of smearing them. */
+.item-icon{width:26px;height:26px;image-rendering:pixelated;border-radius:6px 5px 7px 5px;flex:none}
+.inventory-item .item-icon{width:32px;height:32px}
+.pixel-art{image-rendering:pixelated}
+.swatch .pixel-art{width:100%;height:100%;border:0;border-radius:inherit;background:var(--paper2)}
+
+/* Studio: publishing a texture, a model and an optional script. */
+.field-group{margin:14px 0;padding:12px 13px;border:1px dashed var(--line);border-radius:12px 9px 13px 10px}
+.field-group-title{margin:0 0 10px;font:10px 'DM Mono';letter-spacing:.12em;color:var(--ink2)}
+.appearance-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:10px 0}
+.appearance-row label{flex:1;min-width:180px}
+.texture-preview{display:flex;align-items:center;gap:8px}
+.texture-preview img{width:48px;height:48px;border:2px solid var(--ink);border-radius:8px;background:var(--paper2)}
+.button.tiny{padding:6px 10px;font-size:9px}
+.script-area{width:100%;font-family:'DM Mono',monospace;font-size:11px;line-height:1.55;resize:vertical}
+
+/* Scripted-block menu (E). */
+.interact-modal{max-width:330px}
+.interact-options{display:grid;gap:8px;margin-top:16px}
+
+/* Ten hotbar slots still fit a phone. */
+@media(max-width:640px){#hotbar{gap:4px}.hotbar-slot{width:38px;height:38px}.hotbar-slot .swatch,.hotbar-slot .item-icon{width:20px;height:20px}.hotbar-key{font-size:8px;left:4px}.hotbar-qty{font-size:9px;right:4px}}
+
+/* Drag to arrange: the dragged stack fades, the landing place answers. */
+.inventory-item.dragging,.hotbar-slot.dragging{opacity:.35}
+.inventory-item.drop-target,.hotbar-slot.drop-target{outline:2px dashed var(--accent-deep);outline-offset:2px}

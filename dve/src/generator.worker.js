@@ -6,6 +6,7 @@ import { WorldGeneration } from "@divinevoxel/vlox/Tasks/WorldGeneration/WorldGe
 import { WorldSpaces } from "@divinevoxel/vlox/World/WorldSpaces";
 import { Threads } from "@amodx/threads";
 import { SLAB, baseBlock, voxelIdFor } from "./world.js";
+import { healVoxelTags, installLUTSync } from "./lut-repair.js";
 
 // Diagnostics: count engine pipeline tasks on this thread, capture throws.
 const gcounts = {};
@@ -94,7 +95,15 @@ class ACWorldGen {
 const gen = new ACWorldGen();
 WorldGeneration.setWorldGen(gen);
 gen.init();
+installLUTSync(e => { if (gerrs.length < 8) gerrs.push("shift:" + String(e.message).slice(0, 90)); });
+
 await StartGenerator({});
+
+// The terrain mirror paints published blocks (server edits replayed into the
+// generator's world), and an unencoded palette id writes air silently here just
+// as it does in the world thread. installLUTSync aligns this thread to main's
+// ids when the payload lands; the interval catches late publishes.
+setInterval(() => { try { healVoxelTags(); } catch { /* mid-transfer */ } }, 2000);
 
 Threads.registerTask("gen-stats", () => {
   const binKeys = [];

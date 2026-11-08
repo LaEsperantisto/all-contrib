@@ -3,10 +3,11 @@
 // player enters the 3D game; the app owns placement/breaking through the API,
 // this module paints/erases voxels from server-authoritative edits and drives
 // the first-person camera (look + WASD + gravity/jump), nothing else.
-import { Engine, Scene, FreeCamera, Vector3, Color4, Matrix, MeshBuilder, Mesh, StandardMaterial, Color3, DynamicTexture, GlowLayer } from "@babylonjs/core";
+import { Engine, Scene, FreeCamera, Vector3, Color4, Matrix, MeshBuilder, Mesh, TransformNode, StandardMaterial, Color3, DynamicTexture, GlowLayer } from "@babylonjs/core";
 import { DVE_REV } from "../dist/rev.js";
 import InitDVEBRClassic from "@divinevoxel/vlox-babylon/Init/Classic/InitDVEBRClassic";
 import { StartRenderer } from "@divinevoxel/vlox/Init/StartRenderer";
+import { healVoxelTags } from "./lut-repair.js";
 import { VoxelBuildSpace } from "@divinevoxel/vlox/Builder/VoxelBuildSpace";
 import { PaintVoxelData } from "@divinevoxel/vlox/Voxels";
 import { VoxelLUT } from "@divinevoxel/vlox/Voxels/Data/VoxelLUT";
@@ -30,6 +31,29 @@ _T.registerTask = (name, cb) => _rt(name, (...a) => {
     throw e;
   }
 });
+
+// Models a published block may ask for. vlox ships a closed set (InitVoxelData
+// hardcodes it), so anything outside this list crashes client init — the Studio
+// offers exactly these and the Worker refuses the rest. Each entry is safe with
+// no voxel states set: the default state renders the base shape.
+export const BLOCK_MODELS = [
+  "dve_simple_cube",              // the whole block, one texture
+  "dve_full_texture_cube",        // six face slots (fed the same texture here)
+  "dve_transparent_simple_cube",  // glass: faces culled only against equals
+  "dve_no_cull_simple_cube",      // always-drawn cube
+  "dve_simple_half_cube",         // slab
+  "dve_simple_stair",             // stair
+  "dve_simple_thin_panel",        // 3/16 panel
+  "dve_simple_crossed_panels",    // X-shaped plant
+  "dve_pillar_cube",              // connect-aware pillar texture
+  "dve_carpet",                   // 1/16 carpet
+];
+const MODEL_IDS = new Set(BLOCK_MODELS);
+
+// A texture payload must be a small PNG data URL; anything else falls back to
+// the block's registry colour.
+const isTexture = (value) =>
+  typeof value === "string" && value.length < 200_000 && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(value);
 
 function solidColourTexture(hex) {
   const c = document.createElement("canvas");
@@ -248,9 +272,13 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     camera.position.z = clamp(camera.position.z, SLAB.Z0 + 0.4, SLAB.Z1 - 0.4);
   };
 
-  // One voxel + one solid-colour texture per registered block. The registry
-  // snapshot is taken when the view is created; publish a new block, then
-  // re-enter the game to see it (vlox textures are compiled at init).
+  // One voxel + one texture per registered block. The registry snapshot is
+  // taken when the view is created; publish a new block, then re-enter the game
+  // to see it (vlox textures are compiled at init).
+  // "Flat colours" (the default) paints every block its registry colour. With
+  // the other setting a block that ships a texture uses it, and a block that
+  // names a model gets that shape instead of a cube.
+  const textured = opts.settings?.render === "detailed";
   const textureData = [];
   const voxels = [];
   const seen = new Set();
@@ -258,16 +286,26 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     const vid = voxelIdFor(b.id);
     if (seen.has(vid)) continue;
     seen.add(vid);
-    textureData.push({ id: `tex_${vid}`, base64: solidColourTexture(b.colour) });
+    const useTexture = textured && isTexture(b.texture);
+    textureData.push({ id: `tex_${vid}`, base64: useTexture ? b.texture : solidColourTexture(b.colour) });
+    const model = textured && MODEL_IDS.has(b.model) ? b.model : "dve_simple_cube";
+    // Every texture slot the shipped models might read, filled with this one
+    // texture: the models differ in which names they ask for, and unused keys
+    // cost nothing.
+    const t = `tex_${vid}`;
+    const slots = {
+      texture: t, upTex: t, downTex: t, northTex: t, southTex: t, eastTex: t, westTex: t,
+      upDownTextures: t, sideTextures: t, topBottomTex: t, sideTex: t,
+    };
     voxels.push({
       id: vid,
       name: vid,
       properties: {
         dve_model_data: {
-          id: "dve_simple_cube",
+          id: model,
           modSchema: [],
           modRelationSchema: [],
-          inputs: { "*": { texture: `tex_${vid}` } },
+          inputs: { "*": slots },
         },
       },
     });
@@ -313,6 +351,44 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     }
   };
 
+  // ---- Beacon beams --------------------------------------------------------
+  // A scripted block (today: the beacon) can ask for a column of light that
+  // runs from its own cell to the top of the world. The object owns who has a
+  // beam and in what colour; the client just draws what it is told, so a beam
+  // cannot be conjured locally. One translucent emissive box per source cell,
+  // in the bloom layer for the halo.
+  const beams = new Map();               // "x,y,z" -> Mesh
+  const setBeam = (x, y, z, colour) => {
+    const key = `${x},${y},${z}`;
+    const old = beams.get(key);
+    const hex = typeof colour === "string" && /^#[0-9a-f]{6}$/i.test(colour) ? colour : null;
+    if (!hex) {
+      if (old) {
+        try { glowLayer.removeIncludedOnlyMesh(old); } catch { /* already gone */ }
+        old.dispose(false, true);
+        beams.delete(key);
+      }
+      return;
+    }
+    let m = old;
+    if (!m) {
+      const height = Math.max(1, SLAB.Y1 - y);
+      m = MeshBuilder.CreateBox("beam", { width: 0.5, depth: 0.5, height }, scene);
+      m.position.set(x + 0.5, y + height / 2, z + 0.5);
+      m.renderingGroupId = VOXEL_GROUP;
+      const mat = new StandardMaterial("beam-mat", scene);
+      mat.emissiveColor = Color3.FromHexString(hex);
+      mat.diffuseColor = Color3.Black();
+      mat.disableLighting = true;
+      mat.alpha = 0.4;
+      m.material = mat;
+      glowLayer.addIncludedOnlyMesh(m);
+      beams.set(key, m);
+    } else {
+      m.material.emissiveColor = Color3.FromHexString(hex);
+    }
+  };
+
   const renderer = await InitDVEBRClassic({
     textureTypes: [],
     substances: [],
@@ -342,6 +418,12 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     // so mesher sun shading would multiply faces by empty light data.
     mesher: { doSunLight: false },
   });
+
+  // StartRenderer registered every published block, so the palette is final
+  // from here on. Repair the encode for the names vlox's thread sync left
+  // unencoded before any thread paints or meshes one, and before the pick
+  // raycast starts decoding cells on this thread.
+  healVoxelTags();
 
   DVER.threads.world.runTask("start-world", []);
 
@@ -447,10 +529,10 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     const root = new Mesh("player", scene);
     root.renderingGroupId = VOXEL_GROUP;
     const parts = [];
-    const part = (w, h, d, y, key, x = 0, z = 0) => {
+    const part = (w, h, d, y, key, x = 0, z = 0, parent = root) => {
       const m = MeshBuilder.CreateBox("part", { width: w, height: h, depth: d }, scene);
       m.position.set(x, y, z);
-      m.parent = root;
+      m.parent = parent;
       m.renderingGroupId = VOXEL_GROUP;
       const mat = new StandardMaterial("part-mat", scene);
       m.material = mat;
@@ -459,12 +541,22 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     };
     part(0.5, 0.9, 0.3, 0.45, "accent_colour");   // legs
     part(0.6, 0.55, 0.35, 1.22, "body_colour");   // body
-    part(0.4, 0.35, 0.35, 1.67, "head_colour");   // head
+    // The head (and the eyes on it) hangs off a pivot so the avatar can tilt
+    // its head to match the sender's pitch, the way the local camera does.
+    const head = new TransformNode("head", scene);
+    head.parent = root;
+    head.position.set(0, 1.67, 0);
+    part(0.4, 0.35, 0.35, 0, "head_colour", 0, 0, head);
     // Eyes sit on the +Z face of the head (rotation.y = the sender's camera
     // yaw, so yaw 0 faces +Z). They are the facing cue for other players and
     // the fourth customisable colour.
-    part(0.11, 0.1, 0.06, 1.72, "eye_colour", 0.1, 0.19);
-    part(0.11, 0.1, 0.06, 1.72, "eye_colour", -0.1, 0.19);
+    part(0.11, 0.1, 0.06, 0.05, "eye_colour", 0.1, 0.19, head);
+    part(0.11, 0.1, 0.06, 0.05, "eye_colour", -0.1, 0.19, head);
+    // The held item: a small cube in the item's own colour, gripped at the
+    // side of the body. Null until a pose frame says what is in hand. Its key
+    // is null because its colour comes from pose frames, not the appearance.
+    const held = part(0.3, 0.3, 0.3, 1.02, null, 0.48, 0.22);
+    held.setEnabled(false);
     const label = MeshBuilder.CreatePlane("name", { width: Math.min(2.2, 0.25 + String(name).length * 0.13), height: 0.34 }, scene);
     label.position.y = 2.15;
     label.parent = root;
@@ -486,7 +578,11 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     lmat.opacityTexture = tex;
     lmat.disableLighting = true;
     label.material = lmat;
-    r = { root, parts, look: null, rx: NaN, ry: 0, target: null, last: 0, vx: 0, vy: 0, vz: 0 };
+    r = {
+      root, parts, head, held, look: null, lit: null, pitch: 0, heldColour: null,
+      rx: NaN, ry: 0, target: null, last: 0, vx: 0, vy: 0, vz: 0,
+      hitAt: 0, flashWas: -1, down: false,
+    };
     remotes.set(name, r);
     applyLook(r, appearance);
     return r;
@@ -496,13 +592,25 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     if (r.look === look) return;
     r.look = look;
     const parsed = JSON.parse(look);
+    r.lit = [];
     for (const { mat, key } of r.parts) {
+      if (!key) continue;                 // the held cube is coloured per pose
       const col = Color3.FromHexString(parsed[key]);
       mat.diffuseColor = col;
       // Eyes carry a little more self-illumination so the facing cue survives
       // the night, when diffuse shading is nearly black.
-      mat.emissiveColor = col.scale(key === "eye_colour" ? 0.6 : 0.3);
+      r.lit.push({ mat, glow: col.scale(key === "eye_colour" ? 0.6 : 0.3) });
     }
+    r.flashWas = -1;                      // re-apply the current flash level
+  };
+  // White hit flash: a body that was just struck burns to white for a moment,
+  // for everyone watching, not only on the victim's own screen.
+  const WHITE = Color3.White();
+  const flashRemote = (r, now) => {
+    const f = Math.max(0, 0.6 - (now - r.hitAt) / 450);
+    if (r.flashWas === f) return;
+    r.flashWas = f;
+    for (const { mat, glow } of r.lit) mat.emissiveColor = Color3.Lerp(glow, WHITE, f);
   };
   const advanceRemotes = () => {
     const now = Date.now();
@@ -513,6 +621,18 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
         remotes.delete(name);
         continue;
       }
+      // Head tilt, held item, hit flash and the death pose all come straight
+      // off the pose frame, so they stay right even when the body is not
+      // moving (a player who stands still and looks around still reads right).
+      r.head.rotation.x = r.pitch;
+      r.root.rotation.x = r.down ? -1.4 : 0;
+      r.held.setEnabled(!!r.heldColour);
+      if (r.heldColour) {
+        const col = Color3.FromHexString(r.heldColour);
+        r.held.material.diffuseColor = col;
+        r.held.material.emissiveColor = col.scale(0.35);
+      }
+      flashRemote(r, now);
       if (!r.target) continue;
       const t = r.target;
       // Dead-reckon: while waiting for the next 5 Hz pose frame, coast the
@@ -651,12 +771,14 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
       for (const child of m.root.getChildren()) {
         if (child.name === "mob-part" && child.position.y < m.h * 0.55) child.rotation.x = swing;
       }
-      // Recent hit: brief brightening so an attack reads without a health bar.
-      const flash = Math.max(0, 0.35 - (now - m.hitAt) / 400);
+      // Recent hit: the body burns to white for a moment, the same language as
+      // a player's avatar, so an attack reads without a health bar.
+      const flash = Math.max(0, 0.6 - (now - m.hitAt) / 450);
       if (m.flashWas !== flash) {
         m.flashWas = flash;
         for (const child of m.root.getChildren()) {
-          if (child.material && child.name === "mob-part") child.material.emissiveColor = child.material.diffuseColor.scale(0.22 + flash * 1.6);
+          if (child.material && child.name === "mob-part")
+            child.material.emissiveColor = Color3.Lerp(child.material.diffuseColor.scale(0.22), WHITE, flash);
         }
       }
     }
@@ -695,7 +817,7 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
       // single-threaded world worker; drive that task directly instead.
       const id = blockId === "air" ? "dve_air" : voxelIdFor(blockId);
       const raw = PaintVoxelData.ToRaw(PaintVoxelData.Create({ id }));
-      await DVER.threads.world.runTaskAsync("paint-direct", [[0, x, y, z], raw, id]);
+      const painted = await DVER.threads.world.runTaskAsync("paint-direct", [[0, x, y, z], raw, id]);
       syncGlow(x, y, z, blockId);
       // Keep the generator's edit map current, so cells that activate AFTER
       // this edit still generate the edited block (far-cell streaming).
@@ -703,6 +825,9 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
         const gen = DVER.threads.generators.getThreads()[0];
         if (gen) gen.runTaskAsync("note-edit", { x, y, z, block_id: blockId });
       } catch { /* generator restart will re-fetch from the API anyway */ }
+      // "ok" / "fail" from the world thread: the worker reads the cell back, so
+      // "fail" means the voxel really is not in the client's world.
+      return painted;
     },
 
     /**
@@ -735,17 +860,34 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     /** Update live settings (sensitivity/fov/render distance/speed). */
     setSettings(next) { applySettings(next); },
     /**
-     * Place or update a remote player's avatar from a presence pose frame.
-     * vx/vy/vz (optional, blocks/sec) let advanceRemotes dead-reckon the
-     * avatar along its velocity between pose frames.
+     * Place or update a remote player's avatar from a presence pose frame
+     * `{name,x,y,z,yaw,pitch,held,appearance,vx,vy,vz}`. vx/vy/vz (optional,
+     * blocks/sec) let advanceRemotes dead-reckon the avatar along its velocity
+     * between pose frames; `pitch` tilts the head and `held` (a #rrggbb) is the
+     * item in their hand.
      */
-    setRemote(name, x, y, z, yaw, appearance, vx, vy, vz) {
-      const r = ensureRemote(name, appearance);
-      applyLook(r, appearance);
-      r.target = { x, y, z, yaw };
+    setRemote(frame) {
+      const name = String(frame.name ?? "");
+      if (!name) return;
+      const r = ensureRemote(name, frame.appearance);
+      applyLook(r, frame.appearance);
+      const num = v => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+      r.target = { x: num(frame.x), y: num(frame.y), z: num(frame.z), yaw: num(frame.yaw) };
+      r.pitch = clamp(num(frame.pitch), -1.6, 1.6);
+      r.heldColour = /^#[0-9a-f]{6}$/i.test(String(frame.held ?? "")) ? frame.held : null;
       const vel = v => (typeof v === "number" && Number.isFinite(v) ? clamp(v, -30, 30) : 0);
-      r.vx = vel(vx); r.vy = vel(vy); r.vz = vel(vz);
+      r.vx = vel(frame.vx); r.vy = vel(frame.vy); r.vz = vel(frame.vz);
       r.last = Date.now();
+    },
+    /** Start a white hit flash on a remote avatar (the object says it was hit). */
+    flashPlayer(name) {
+      const r = remotes.get(String(name ?? ""));
+      if (r) r.hitAt = Date.now();
+    },
+    /** A dead player's avatar lies down instead of standing there upright. */
+    setDown(name, down) {
+      const r = remotes.get(String(name ?? ""));
+      if (r) r.down = !!down;
     },
     removeRemote(name) {
       const r = remotes.get(name);
@@ -791,6 +933,44 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
       }
       return best;
     },
+
+    /**
+     * The other player the crosshair is over, within melee reach (or null).
+     * Same ray/AABB test as pickMob; the object is the authority on whether the
+     * swing lands, so this only decides who the client meant to hit.
+     */
+    pickPlayer() {
+      const dir = camera.getForwardRay().direction;
+      const ox = camera.position.x, oy = camera.position.y, oz = camera.position.z;
+      let best = null, bestT = 6;
+      for (const [name, r] of remotes) {
+        if (r.down) continue;                     // a body on the ground is not a target
+        const p = r.root.position;
+        const minX = p.x - 0.35, maxX = p.x + 0.35;
+        const minY = p.y, maxY = p.y + 1.95;
+        const minZ = p.z - 0.35, maxZ = p.z + 0.35;
+        let t0 = 0, t1 = bestT;
+        let ok = true;
+        for (const [o, d, lo, hi] of [[ox, dir.x, minX, maxX], [oy, dir.y, minY, maxY], [oz, dir.z, minZ, maxZ]]) {
+          if (Math.abs(d) < 1e-8) { if (o < lo || o > hi) { ok = false; break; } continue; }
+          let a = (lo - o) / d, b = (hi - o) / d;
+          if (a > b) { const s = a; a = b; b = s; }
+          t0 = Math.max(t0, a); t1 = Math.min(t1, b);
+          if (t0 > t1) { ok = false; break; }
+        }
+        if (ok && t0 >= 0 && t0 < bestT) { bestT = t0; best = { name, distance: t0 }; }
+      }
+      return best;
+    },
+
+    /** Start a white hit flash on a mob body (the object says it was hit). */
+    flashMob(id) {
+      const m = mobs.get(String(id ?? ""));
+      if (m) m.hitAt = Date.now();
+    },
+
+    /** A scripted block's light column. `colour` is #rrggbb, or null to remove. */
+    setBeam(x, y, z, colour) { setBeam(x, y, z, colour); },
 
     /** Teleport the local body (respawn). y is eye height, like `pose`. */
     setPose(state) {

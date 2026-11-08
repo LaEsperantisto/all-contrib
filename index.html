@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f3ead8">
   <title>All Contribute</title>
   <link rel="icon" type="image/svg+xml" href="./favicon.svg?v=1">
-  <link rel="stylesheet" href="./styles.css?v=7">
+  <link rel="stylesheet" href="./styles.css?v=8">
 </head>
 <body>
   <!-- The site IS the game: opening the page boots straight into the shared
@@ -109,9 +109,16 @@
       <label>Field of view<input id="set-fov" type="range" min="60" max="110" step="1" value="80"><output id="set-fov-out">80°</output></label>
       <label>Render distance<input id="set-distance" type="range" min="120" max="2000" step="20" value="900"><output id="set-distance-out">900</output></label>
       <label>Movement speed<input id="set-speed" type="range" min="3" max="20" step="1" value="8"><output id="set-speed-out">8</output></label>
+      <label>Look<select id="set-render"><option value="flat">Flat colours</option><option value="detailed">Textures, models &amp; icons</option></select></label>
     </div>
-    <p class="micro-note">Settings are stored in this browser and apply to the 3D game immediately.</p>
+    <p class="micro-note">Settings are stored in this browser and apply to the 3D game immediately, except <b>Look</b>, which is compiled into the world when you join — change it, then leave and rejoin.</p>
     <button id="settings-reset" class="text-button" type="button">Reset to defaults</button>
+  </dialog>
+
+  <dialog id="interact-dialog" class="modal interact-modal">
+    <form method="dialog" class="modal-close"><button aria-label="Close">×</button></form>
+    <div class="modal-mark">✦</div><span class="eyebrow">SCRIPTED BLOCK</span><h2 id="interact-title">Block</h2>
+    <div id="interact-options" class="interact-options"></div>
   </dialog>
 
   <dialog id="inventory-dialog" class="modal wide-modal">
@@ -125,7 +132,7 @@
           <div class="form-row add-item-row"><label>Quantity<input id="add-item-quantity" type="number" min="1" max="999" value="16" required></label><button class="button button-primary add-item-button" type="submit">＋ Add test items</button></div>
         </form>
         <p id="add-item-note" class="micro-note" hidden>Testing tool: grants stacks to your account (server-side). Placing spends, breaking returns; IDs not in the registry cannot be placed.</p>
-        <div class="inventory-list-heading"><span>ITEM</span><span>QUANTITY</span></div>
+        <div class="inventory-list-heading"><span>ITEM · DRAG TO ARRANGE</span><span>QUANTITY</span></div>
         <div id="inventory-list" class="inventory-list"><div class="empty">Your inventory is empty. Break blocks in the world or add items above.</div></div>
         <button id="clear-inventory-button" class="text-button" type="button">Clear inventory</button>
       </article>
@@ -178,6 +185,22 @@
             <label>Incompatible IDs <span class="optional">comma-separated; placement refuses next to these</span><input id="block-incompatible" placeholder="builtin:stone, …" autocomplete="off" spellcheck="false"></label>
           </div>
           <div class="edit-note" id="block-edit-note" hidden>Editing <code id="block-edit-id"></code> — the ID cannot change. <button type="button" id="block-edit-cancel" class="text-button">Cancel edit</button></div>
+          <div class="field-group">
+            <h3 class="field-group-title">Look and programming <span class="optional">optional</span></h3>
+            <div class="appearance-row">
+              <label>Texture <span class="optional">PNG, resampled to 16×16</span>
+                <input id="block-texture" type="file" accept="image/png,image/jpeg">
+              </label>
+              <div class="texture-preview"><img id="block-texture-preview" class="pixel-art" hidden alt="Published block texture"><button class="button button-outline tiny" id="block-texture-clear" type="button" hidden>Remove</button></div>
+            </div>
+            <label>Model <span class="optional">shape the renderer draws</span><select id="block-model"><option value="">Full cube (default)</option></select></label>
+            <label>Script <span class="optional">Lua; runs on the Worker when a player presses E on this block</span>
+              <textarea id="block-script" class="script-area" rows="8" spellcheck="false" autocomplete="off" placeholder="-- on_interact() answers the player; on_choice(key) handles a menu pick.
+-- Available: player, key, state_get(k), state_set(k,v), menu(title, options),
+-- beam(colour), toast(message), log(message), plus math/string/table."></textarea>
+            </label>
+          </div>
+
           <button class="button button-primary full" id="block-submit" type="submit">Publish block <span>＋</span></button>
         </form>
         <p class="micro-note">No arbitrary code is executed. This prototype accepts safe block properties only.</p>
@@ -201,6 +224,12 @@
             <label id="item-speed-row">Mining speed (×)<input id="item-speed" type="number" min="0.1" max="10" step="0.1" value="1"></label>
             <label id="item-heal-row">Heals (hearts)<input id="item-heal" type="number" min="0" max="20" step="0.5" value="0"></label>
             <label id="item-durability-row">Durability (0 = worn)<input id="item-durability" type="number" min="0" max="1000" value="0"></label>
+          </div>
+          <div class="appearance-row">
+            <label>Icon <span class="optional">PNG, resampled to 32×32; shown in the bag and hotbar</span>
+              <input id="item-icon" type="file" accept="image/png,image/jpeg">
+            </label>
+            <div class="texture-preview"><img id="item-icon-preview" class="pixel-art" hidden alt="Published item icon"><button class="button button-outline tiny" id="item-icon-clear" type="button" hidden>Remove</button></div>
           </div>
           <label>Colour<input id="item-colour" type="color" value="#c9a35f" class="colour-input"></label>
           <div class="edit-note" id="item-edit-note" hidden>Editing <code id="item-edit-id"></code> — the ID cannot change. <button type="button" id="item-edit-cancel" class="text-button">Cancel edit</button></div>
@@ -235,6 +264,6 @@
   </dialog>
 
   <div id="toast" role="status" class="toast"></div>
-  <script src="./app.js?v=11"></script>
+  <script src="./app.js?v=15"></script>
 </body>
 </html>

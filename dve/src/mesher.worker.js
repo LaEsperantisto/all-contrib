@@ -2,6 +2,10 @@
 // Wraps vlox task registration with counters for headless diagnostics.
 import { StartMesher } from "@divinevoxel/vlox/Init/StartMesher";
 import { Threads } from "@amodx/threads";
+import { healVoxelTags, installLUTSync } from "./lut-repair.js";
+import { VoxelLUT } from "@divinevoxel/vlox/Voxels/Data/VoxelLUT";
+import { VoxelSchemas } from "@divinevoxel/vlox/Voxels/State/VoxelSchemas";
+import { VoxelTagsRegister } from "@divinevoxel/vlox/Voxels/Data/VoxelTagsRegister";
 
 const counts = { BuildSection: 0, BuildSectionSnapShot: 0, BuildSector: 0, setSectionSent: 0 };
 const merrs = [];
@@ -22,6 +26,28 @@ const origTask = Threads.registerTask.bind(Threads);
 Threads.registerBinaryTask = wrap(origBinary);
 Threads.registerTask = wrap(origTask);
 
+installLUTSync(e => { if (merrs.length < 12) merrs.push("shift:" + String(e.message).slice(0, 90)); });
+
 await StartMesher({});
+
+// Meshing a section decodes every voxel id through this thread's tables, so the
+// published blocks that sync-data leaves unencoded kill the whole build: the
+// mesher throws and the section never reaches the renderer. installLUTSync runs
+// the repair the moment the payload lands; the interval catches late publishes.
+setInterval(() => { try { healVoxelTags(); } catch { /* mid-transfer */ } }, 2000);
+
+Threads.registerTask("lut-stats", () => {
+  const V = VoxelLUT, pal = V.voxelIds._palette || [];
+  const rows = [];
+  for (let i = 0; i < pal.length; i++) {
+    const rs = V.voxelRecordStartIndex[i];
+    rows.push([pal[i], V.modelsIndex[i], V.totalStates[i],
+      V.voxelRecord[rs], VoxelSchemas.reltionalStateBuilderMap[V.modelsIndex[i]] ? "b" : "-",
+      VoxelTagsRegister.VoxelTags[i] ? "t" : "-", V.geometryIndex[i] !== undefined ? "g" : "-"]);
+  }
+  const builders = [];
+  for (let i = 0; i < VoxelSchemas.reltionalStateBuilderMap.length; i++) if (VoxelSchemas.reltionalStateBuilderMap[i]) builders.push(i);
+  return [[pal.length, V.totalVoxelIds, V.totalRelationalVoxelIds, V.models._palette.slice(0, 24), builders, rows]];
+});
 
 Threads.registerTask("mesh-stats", () => [[counts, merrs]]);

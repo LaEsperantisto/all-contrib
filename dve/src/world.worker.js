@@ -13,9 +13,12 @@ import { WorldSpaces } from "@divinevoxel/vlox/World/WorldSpaces";
 import { WorldRegister } from "@divinevoxel/vlox/World/WorldRegister";
 import { Sector } from "@divinevoxel/vlox/World/Sector";
 import { WorldSimulationTasks } from "@divinevoxel/vlox/WorldSimulation/Internal/WorldSimulationTasks.js";
+import { WorldSimulationTools } from "@divinevoxel/vlox/WorldSimulation/Internal/WorldSimulationTools.js";
 import { SnapShots } from "@divinevoxel/vlox/World/SnapShot/SnapShots";
 import { VoxelLUT } from "@divinevoxel/vlox/Voxels/Data/VoxelLUT";
 import { VoxelTagsRegister } from "@divinevoxel/vlox/Voxels/Data/VoxelTagsRegister";
+import { SectionStateDefaultTicks } from "@divinevoxel/vlox/World/Section/SectionState.js";
+import { ensureRecord, healVoxelTags, installLUTSync } from "./lut-repair.js";
 
 // vlox's sync-data payload carries LUTs + properties for all published
 // voxels but BuildTagData can skip custom entries, leaving VoxelTags sparse
@@ -23,123 +26,47 @@ import { VoxelTagsRegister } from "@divinevoxel/vlox/Voxels/Data/VoxelTagsRegist
 // throws, wedging paint-voxel tasks (locks never released). Rebuild the
 // missing entries in-thread from the synced properties + model registry.
 import { BuildTagAndPaletteData } from "@divinevoxel/vlox/Voxels/Functions/BuildTagData";
-// sync-data's StringPalette.load APPENDS the imported voxel/model palettes
-// onto the world thread's own builtin registrations, but every positional
-// table (modelsIndex, totalStates, voxelModMaps, VoxelTags, ...) is assigned
-// verbatim from the main-side arrays — so data sits at 0..n-1 while the
-// matching palette names sit at off..off+n-1. Shift the trueId/model-keyed
-// tables by the palette offset so lookups line up.
-function shiftLUTToPalette(data) {
-  const V = VoxelLUT;
-  const srcIds = data && data.luts && data.luts.voxel ? data.luts.voxel.voxelIds : null;
-  if (!srcIds || !srcIds.length) return false;
-  const pal = V.voxelIds._palette;
-  const off = pal.indexOf(srcIds[0]);
-  if (off <= 0) return false;
-  const already = V.voxelModMaps && V.voxelModMaps[off + srcIds.length - 1] !== undefined && V.voxelModMaps[off] !== undefined;
-  if (!already) {
-    // Duplicate rather than move: name-keyed lookups resolve to the palette
-    // slots (off..off+n-1) while composite-voxel-id decode hits the main-space
-    // trueIds (0..n-1). Both must carry the same encoding.
-    const shift = arr => {
-      if (!arr) return arr;
-      const a = new Array(Math.max(arr.length, srcIds.length + off));
-      for (let s = 0; s < arr.length; s++) a[s] = arr[s];
-      for (let s = 0; s < srcIds.length && s < arr.length; s++) a[s + off] = arr[s];
-      return a;
-    };
-    const shiftTyped = (arr, Ctor) => {
-      if (!arr) return arr;
-      const a = new Ctor(Math.max(arr.length, srcIds.length + off));
-      for (let s = 0; s < arr.length; s++) a[s] = arr[s];
-      for (let s = 0; s < srcIds.length && s < arr.length; s++) a[s + off] = arr[s];
-      return a;
-    };
-    V.modelsIndex = shift(V.modelsIndex);
-    V.voxelModMaps = shift(V.voxelModMaps);
-    V.voxelRelationalModMaps = shift(V.voxelRelationalModMaps);
-    V.totalStates = shiftTyped(V.totalStates, Uint16Array);
-    V.totalMods = shiftTyped(V.totalMods, Uint16Array);
-    V.totalReltionalStates = shiftTyped(V.totalReltionalStates, Uint16Array);
-    V.totalReltionalMods = shiftTyped(V.totalReltionalMods, Uint16Array);
-    V.voxelRecordStartIndex = shiftTyped(V.voxelRecordStartIndex, Uint16Array);
-    VoxelTagsRegister.VoxelTags = shift(VoxelTagsRegister.VoxelTags);
+// A painted cell has to be re-meshed as well as written. vlox only rebuilds a
+// section when its displayDirty tick changes (SimulationSector.tickUpdate), and
+// a brush write bumps nothing: the voxel lands in the world data but stays
+// invisible until the sector is rebuilt for an unrelated reason. Live symptom:
+// a block the player placed (and could dig again with the crosshair on it)
+// never appeared, and a dug cell never disappeared, until the player walked far
+// enough away for the sector to unload and come back.
+const pendingRemesh = new Set();
+function bumpSection(dim, x, y, z) {
+  try {
+    const sec = WorldRegister.sections.get(dim, x, y, z);
+    if (!sec) return false;
+    sec.incrementTick(SectionStateDefaultTicks.displayDirty);
+    return true;
+  } catch {
+    return false; // buffers detached while the sector is checked out
   }
-  // Model-keyed maps shift by the models-palette offset; remap modelsIndex.
-  const srcModels = data.luts.voxel.models;
-  const moff = srcModels && srcModels.length ? V.models._palette.indexOf(srcModels[0]) : 0;
-  if (moff > 0) {
-    const alreadyM = V.modelStateMaps && V.modelStateMaps[moff + srcModels.length - 1] !== undefined;
-    if (!alreadyM) {
-      const shift = arr => { const a = new Array(Math.max(arr.length, srcModels.length + moff)); for (let s = 0; s < arr.length; s++) a[s] = arr[s]; for (let s = 0; s < srcModels.length && s < arr.length; s++) a[s + moff] = arr[s]; return a; };
-      V.modelStateMaps = shift(V.modelStateMaps);
-      V.modelRelationalStateMaps = shift(V.modelRelationalStateMaps);
-      for (let i = 0; i < V.modelsIndex.length; i++) if (Number.isFinite(V.modelsIndex[i])) V.modelsIndex[i] += moff;
-    }
-  }
-  return true;
 }
-function healVoxelTags() {
-  const pal = VoxelLUT.voxelIds._palette || [];
-  const first = {};
-  for (let i = 0; i < pal.length; i++) if (pal[i] && first[pal[i]] === undefined) first[pal[i]] = i;
-  let n = 0;
-  // Mirror missing LUT entries from the real (imported) slot of the same name.
-  // Worker threads pre-register vlox builtin voxel ids (dve_* and defaults)
-  // before sync-data's load() appends the imported palette, so imported ids
-  // live at an offset; polluted runtime ids sit past both.
-  const src = i => (VoxelLUT.voxelIds._palette || []).findIndex(p => p === VoxelLUT.voxelIds._palette[i] && VoxelLUT.voxelModMaps[p] !== undefined && p < i);
-  // Palette pollution: threads auto-register duplicate ids past the imported
-  // ones (brush/sim string lookups), but the encoding tables only cover the
-  // imported prefix. Brush.paint then reads voxelModMaps[i] -> undefined and
-  // throws, wedging paint-voxel tasks (locks never released). Duplicate each
-  // polluted id's encoding onto its original: same model/state/mod maps and a
-  // record entry pointing at the original composite voxel id, so raw bytes
-  // stay identical to what generators and the mesher already understand.
-  let recExtra = [];
-  for (let i = 0; i < pal.length; i++) {
-    const name = pal[i];
-    if (!name) continue;
-    const complete = VoxelLUT.voxelModMaps[i] && VoxelLUT.modelsIndex[i] !== undefined &&
-      (VoxelLUT.voxelRecordStartIndex[i] > 0 || (i === 0 && VoxelLUT.voxelRecordStartIndex.length > i)) && VoxelLUT.totalStates[i];
-    if (complete) continue;
-    const m = first[name];
-    if (m === undefined) continue;
-    VoxelLUT.voxelModMaps[i] = new Map([[0, 0]]);
-    VoxelLUT.voxelRelationalModMaps[i] = new Map([[0, 0]]);
-    VoxelLUT.modelsIndex[i] = VoxelLUT.modelsIndex[m];
-    if (VoxelLUT.totalStates.length <= i) {
-      const grow = (arr, Ctor) => { const a = new Ctor(Math.max(i + 1, arr.length + 8)); a.set(arr); return a; };
-      VoxelLUT.totalStates = grow(VoxelLUT.totalStates, Uint16Array);
-      VoxelLUT.totalMods = grow(VoxelLUT.totalMods, Uint16Array);
-      VoxelLUT.voxelRecordStartIndex = grow(VoxelLUT.voxelRecordStartIndex, Uint32Array);
-    }
-    VoxelLUT.totalStates[i] = VoxelLUT.totalStates[m];
-    VoxelLUT.totalMods[i] = VoxelLUT.totalMods[m];
-    if (!(VoxelLUT.voxelRecordStartIndex[i] > 0)) {
-      VoxelLUT.voxelRecordStartIndex[i] = VoxelLUT.voxelRecord.length + recExtra.length;
-      recExtra.push(VoxelLUT.voxelRecord[VoxelLUT.voxelRecordStartIndex[m]]);
-    }
-    if (VoxelTagsRegister.VoxelTags[m] && !VoxelTagsRegister.VoxelTags[i])
-      VoxelTagsRegister.VoxelTags[i] = VoxelTagsRegister.VoxelTags[m];
-    n++;
-  }
-  if (recExtra.length) {
-    const r = new (VoxelLUT.voxelRecord.constructor)(VoxelLUT.voxelRecord.length + recExtra.length);
-    r.set(VoxelLUT.voxelRecord);
-    r.set(recExtra, VoxelLUT.voxelRecord.length);
-    VoxelLUT.voxelRecord = r;
-  }
-  // Tags fallback for any palette id still missing tags (older payloads).
-  const missing = [];
-  for (let i = 0; i < pal.length; i++) {
-    const id = pal[i];
-    if (!id || VoxelTagsRegister.VoxelTags[i]) continue;
-    missing.push({ id, name: id, properties: {} });
-  }
-  if (missing.length) BuildTagAndPaletteData({ voxels: missing, models: [], substances: [], materials: [] });
-  return n + missing.length;
+function queueRemesh(x, y, z) {
+  const b = WorldSpaces.section.bounds;
+  const sx = Math.floor(x / b.x) * b.x, sy = Math.floor(y / b.y) * b.y, sz = Math.floor(z / b.z) * b.z;
+  const touched = [[sx, sy, sz]];
+  // The neighbour shares the culled face, so an edit on a section boundary has
+  // to dirty the next section out too.
+  if (x === sx) touched.push([sx - b.x, sy, sz]);
+  if (x === sx + b.x - 1) touched.push([sx + b.x, sy, sz]);
+  if (y === sy) touched.push([sx, sy - b.y, sz]);
+  if (y === sy + b.y - 1) touched.push([sx, sy + b.y, sz]);
+  if (z === sz) touched.push([sx, sy, sz - b.z]);
+  if (z === sz + b.z - 1) touched.push([sx, sy, sz + b.z]);
+  for (const t of touched) if (!bumpSection(0, t[0], t[1], t[2])) pendingRemesh.add(t.join(","));
+  if (pendingRemesh.size > 512) pendingRemesh.delete(pendingRemesh.values().next().value);
 }
+setInterval(() => {
+  if (!pendingRemesh.size) return;
+  for (const key of [...pendingRemesh]) {
+    const [x, y, z] = key.split(",").map(Number);
+    if (bumpSection(0, x, y, z)) pendingRemesh.delete(key);
+  }
+}, 500);
+
 
 // Server echo paint path. The stock "paint-voxel" task awaits LockSectors,
 // which wedges forever on sectors checkedOut for mesher transfer
@@ -158,12 +85,28 @@ Threads.registerTask("paint-direct", async ([loc, raw, id]) => {
       brush.setXYZ(loc[1], loc[2], loc[3]);
       brush.setRaw(raw);
       if (id) brush.data.id = id;
-      brush.paint({ includedAreas: [] });
-      return "ok";
+      brush.paint();
+      // Read the cell back. vlox encodes the name through this thread's LUT,
+      // and a name with no encode entry writes 0 (air) with no error at all —
+      // without this check a failed placement looks like a successful one.
+      const back = brush.dataCursor.getVoxel(loc[1], loc[2], loc[3]);
+      if (back) {
+        back.process();
+        const got = back.getStringId();
+        if (got === id || (id === "dve_air" && (!got || got === "dve_air" || back.getRaw()[0] === 0))) {
+          queueRemesh(loc[1], loc[2], loc[3]);
+          return "ok";
+        }
+        last = "read-back:" + String(got);
+        if (id !== "dve_air") {
+          const tid = VoxelLUT.voxelIds.getNumberId(id);
+          if (tid > 0) ensureRecord(tid);
+        }
+      }
     } catch (e) {
       last = String(e && e.message).slice(0, 90);
-      await new Promise(r => setTimeout(r, 250));
     }
+    await new Promise(r => setTimeout(r, 250));
   }
   werrs.push("pd-fail @" + loc.join(",") + " raw=" + JSON.stringify(Array.from(raw)) + " " + last);
   return "fail";
@@ -192,24 +135,16 @@ for (const key of Object.keys(WorldSimulationTasks)) {
 }
 Threads.registerTask("dispatch-stats", () => [[dispatchCounts, dispatchLog.slice(-40)]]);
 
-// Diagnostics: capture the real sync-data payload vlox sends to this thread.
-const __rt = Threads.registerTask.bind(Threads);
-Threads.registerTask = (id, fn) => {
-  if (id === "sync-data") {
-    return __rt(id, (data) => {
-      const r = fn(data);
-      try { shiftLUTToPalette(data); } catch (e) { if (werrs.length < 8) werrs.push("shift err:" + String(e.message).slice(0, 80)); }
-      try { healVoxelTags(); } catch { /* buffer mid-transfer; the 2s interval retries */ }
-      return r;
-    });
-  }
-  return __rt(id, fn);
-};
+// vlox hands every thread a synced LUT payload whose positional tables do not
+// line up with this thread's own palette; repair them the moment it lands.
+installLUTSync(e => { if (werrs.length < 8) werrs.push("shift err:" + String(e.message).slice(0, 80)); });
 
 new VoxelBuildSpaceWorld();
 
 const DVEW = await StartWorld();
-healVoxelTags();
+// No heal before sync-data: allocating ids here is exactly what put this
+// thread's published blocks out of step with the mesher's numbering. The
+// sync-time repair (installLUTSync) and the 2s interval cover it.
 
 WorldSimulation.init({
   parent: DVEW.threads.parent,
@@ -294,6 +229,41 @@ const fakeDone = new Set();
 const realGen = new Set();
 const revoked = new Set();
 const stuckCounts = new Map();
+
+// A sector whose buffer went to a generator thread and never came back is
+// permanently "checked out": vlox's own unload path cannot free it (the sim
+// sector is already gone), and the manual free below crashes inside
+// returnSector on the detached buffer, which aborts WorldRegister.remove
+// BEFORE it deletes the map entry. The stale object then outlives the cell:
+// walking back re-binds it, generateUpdate skips it (isCheckedOut), and the
+// chunk never streams in again. Track how long each cell has been checked
+// out; past the grace period hand the sector a fresh buffer so the flag and
+// the views are valid again and the pipeline re-dispatches generation (every
+// player edit replays from ACWorldGen.edits, so nothing is lost). A false
+// positive is self-healing: a late check-in just overwrites the fresh buffer
+// with the real painted one.
+const checkedOutAt = new Map();
+const STALE_CHECKOUT_MS = 8000;
+function unstick(x, z) {
+  const sec = WorldRegister.sectors.get(0, x, 0, z);
+  if (!sec) { checkedOutAt.delete(x + "," + z); return false; }
+  const k = x + "," + z;
+  if (!co(sec)) { checkedOutAt.delete(k); return false; }
+  const first = checkedOutAt.get(k);
+  if (first === undefined) { checkedOutAt.set(k, Date.now()); return false; }
+  if (Date.now() - first < STALE_CHECKOUT_MS) return false;
+  try {
+    sec.setBuffer(Sector.CreateNewBuffer());
+    sec.setCheckedOut(false);
+    sec.setLocked(false);
+    if (werrs.length < 8) werrs.push("unstick:" + k);
+  } catch (e) {
+    if (werrs.length < 8) werrs.push("unstick:" + k + ":" + String(e && e.message || e).slice(0, 60));
+  }
+  checkedOutAt.delete(k);
+  return true;
+}
+
 async function driveSlabPipeline() {
   const dim = WorldSimulation.getDimension(0);
   const seen = new Map();
@@ -312,6 +282,10 @@ async function driveSlabPipeline() {
           s.sector = WorldRegister.sectors.get(0, ...s.position);
         }
       }
+      // A cell re-activated onto a sector orphaned by an earlier drop must
+      // not inherit that stale checkout: generateUpdate skips checked-out
+      // sectors, so the chunk would stay empty forever.
+      unstick(s.position[0], s.position[2]);
     }
     const now = new Set();
     for (const s of sectors) now.add(s.position[0] + "," + s.position[2]);
@@ -321,7 +295,15 @@ async function driveSlabPipeline() {
       // under an active sim sector crashes every later flag read.
       if (now.has(k)) continue;
       if (dim.activeSectors.get(p[0], 0, p[1])) continue;
-      WorldRegister.sectors.removeAt([0, p[0], 0, p[1]]);
+      try {
+        unstick(p[0], p[1]);
+        WorldRegister.sectors.removeAt([0, p[0], 0, p[1]]);
+      } catch (e) {
+        // One wedged cell must not abort the pass: the throw would skip
+        // seen.clear() and every stage-flag repair below it, killing the
+        // whole maintenance loop for the rest of the session.
+        if (werrs.length < 8) werrs.push("free:" + k + ":" + String(e && e.message || e).slice(0, 60));
+      }
     }
     seen.clear();
     for (const s of sectors) seen.set(s.position[0] + "," + s.position[2], s.position);
@@ -453,6 +435,40 @@ let snapLog = [], snapTotal = 0, snapEmpty = 0;
     return ocs.apply(this, arguments);
   };
 }
+
+// Diagnostics: what the re-mesh machinery saw (snapshots taken, queued bumps).
+Threads.registerTask("lut-stats", () => {
+  const V = VoxelLUT, pal = V.voxelIds._palette || [];
+  const rows = [];
+  for (let i = 0; i < pal.length; i++) {
+    const rs = V.voxelRecordStartIndex[i];
+    rows.push([pal[i], V.modelsIndex[i], V.voxelRecord[rs], VoxelTagsRegister.VoxelTags[i] ? "t" : "-"]);
+  }
+  const comp = [];
+  for (let c = 0; c < V.totalVoxelIds; c++) comp.push(pal[V.voxelIdToTrueId[c]] ?? "?");
+  return [[pal.length, V.totalVoxelIds, comp, rows]];
+});
+
+Threads.registerTask("remesh-stats", () => [[snapTotal, snapEmpty, snapLog.slice(-8), pendingRemesh.size]]);
+
+// The snapshot hand-off is the fragile link of the re-mesh path: a section
+// buffer that got detached (checked out elsewhere) makes the payload transfer
+// throw inside a promise chain, and nothing downstream reports it - the mesher
+// simply never hears about the section. Record the calls and their failures.
+const meshSend = { ok: 0, err: [] };
+{
+  const ssb = WorldSimulationTools.taskTool.build.sectionSnapShot;
+  const orig = ssb.run.bind(ssb);
+  ssb.run = (...a) => {
+    try {
+      orig(...a);
+      meshSend.ok++;
+    } catch (e) {
+      if (meshSend.err.length < 8) meshSend.err.push(String(e && e.message || e).slice(0, 90));
+    }
+  };
+}
+Threads.registerTask("mesh-send-stats", () => [[meshSend.ok, meshSend.err]]);
 
 // Diagnostics for headless verification: pipeline flags + queue sizes.
 Threads.registerTask("debug-state", async () => {

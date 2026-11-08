@@ -14,14 +14,14 @@ const shared = {
   logLevel: "warning",
 };
 
-// main.js imports the manifest, so seed a placeholder before the first pass if
-// none is committed; the real hashes are written afterwards (rebuild once more
-// to inline them into the view bundle).
+// The view inlines the manifest (main.js builds worker URLs from it), so the
+// workers have to be bundled and hashed BEFORE the view: bundling the view
+// first makes it carry the previous build's worker hashes, and one `npm run
+// build` after a worker change would ship a view that loads stale workers.
 import { existsSync } from "node:fs";
 if (!existsSync("dist/rev.js"))
   writeFileSync("dist/rev.js", 'export const DVE_REV = {"dve-view.js":"0","world.worker.js":"0","generator.worker.js":"0","mesher.worker.js":"0"};\n');
 
-await build({ ...shared, entryPoints: ["src/main.js"], outfile: "dist/dve-view.js" });
 await build({ ...shared, entryPoints: ["src/world.worker.js"], outfile: "dist/world.worker.js" });
 await build({ ...shared, entryPoints: ["src/generator.worker.js"], outfile: "dist/generator.worker.js" });
 await build({ ...shared, entryPoints: ["src/mesher.worker.js"], outfile: "dist/mesher.worker.js" });
@@ -36,6 +36,13 @@ const rev = {
   "generator.worker.js": hash("generator.worker.js"),
   "mesher.worker.js": hash("mesher.worker.js"),
 };
+writeFileSync("dist/rev.js", `export const DVE_REV = ${JSON.stringify(rev)};\n`);
+
+// Bundle the view last so it inlines the worker hashes written above; its own
+// inlined entry is never read (only app.js picks the view's URL), so updating
+// that entry afterwards keeps the manifest exact for the loader.
+await build({ ...shared, entryPoints: ["src/main.js"], outfile: "dist/dve-view.js" });
+rev["dve-view.js"] = hash("dve-view.js");
 writeFileSync("dist/rev.js", `export const DVE_REV = ${JSON.stringify(rev)};\n`);
 
 console.log("dve view bundled → dist/", rev);
