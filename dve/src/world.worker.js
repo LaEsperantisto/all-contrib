@@ -214,9 +214,19 @@ function lightSection(sec) {
         for (let x = 0; x < D.x; x++) {
           const k = vi(x, y, z);
           const tid = VoxelLUT.voxelIdToTrueId[ids[k]] ?? 0;
-          if (!thruId(tid)) continue;      // a full cube blocks light
-          thru[k] = 1;
           const emit = lightLevel.get(tid);
+          if (!thruId(tid)) {
+            // A full cube blocks light passing THROUGH it, but an emissive one
+            // (glowstone, a beacon) still seeds its own cell and the frontier:
+            // the propagation step's own `thru` guard keeps the dark core dark
+            // while the glow leaves the lamp.
+            if (emit) {
+              rgb[k] = emit;
+              if (tail + 4 <= queue.length) { queue[tail++] = k; queue[tail++] = x; queue[tail++] = y; queue[tail++] = z; }
+            }
+            continue;
+          }
+          thru[k] = 1;
           if (emit) {
             rgb[k] = emit;
             if (tail + 4 <= queue.length) { queue[tail++] = k; queue[tail++] = x; queue[tail++] = y; queue[tail++] = z; }
