@@ -184,6 +184,8 @@
 .texture-preview img{width:48px;height:48px;border:2px solid var(--ink);border-radius:8px;background:var(--paper2)}
 .button.tiny{padding:6px 10px;font-size:9px}
 .script-area{width:100%;font-family:'DM Mono',monospace;font-size:11px;line-height:1.55;resize:vertical}
+.script-editor{width:100%;height:280px;border:1px solid var(--border,#333);border-radius:8px;overflow:hidden}
+.script-editor .monaco-editor{font-family:'DM Mono',monospace}
 
 /* Scripted-block menu (E). */
 .interact-modal{max-width:330px}

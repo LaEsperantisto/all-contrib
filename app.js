@@ -815,11 +815,47 @@ const blockTextureField=wireImageField("block-texture","block-texture-preview","
 const blockTextureTopField=wireImageField("block-texture-top","block-texture-top-preview","block-texture-top-clear",16);
 const blockTextureBottomField=wireImageField("block-texture-bottom","block-texture-bottom-preview","block-texture-bottom-clear",16);
 const itemIconField=wireImageField("item-icon","item-icon-preview","item-icon-clear",32);
+// ---- Lua editor: vendored Monaco over the block-script textarea ----------
+// The textarea stays as the fallback: if the vendor payload ever fails to
+// load, the workshop works exactly as before. The accessors below are the
+// ONLY readers/writers of the script value; they hit whichever surface is live.
+let blockEditor=null;
+let editorMountTried=false;
+let scriptCheckTimer=0;
+function scriptValue(){return blockEditor?blockEditor.getValue():$("block-script").value;}
+function setScriptValue(v){if(blockEditor)blockEditor.setValue(v||"");else $("block-script").value=v||"";}
+async function mountBlockEditor(){
+  if(editorMountTried)return;editorMountTried=true;
+  try{
+    await new Promise((res,rej)=>{const s=document.createElement("script");s.src="/vendor/monaco/vs/loader.js";s.onload=res;s.onerror=()=>rej(new Error("vendor load failed"));document.head.appendChild(s);});
+    const base=location.origin+"/vendor/monaco/vs/";
+    self.MonacoEnvironment={getWorkerUrl:()=> "data:text/javascript;charset=utf-8,"+encodeURIComponent("self.MonacoEnvironment={baseUrl:'"+base+"'};importScripts('"+base+"base/worker/workerMain.js');")};
+    await new Promise((res,rej)=>{self.require.config({paths:{vs:base.replace(/\/$/,"")}});self.require(["vs/editor/editor.main"],res,()=>rej(new Error("amd load failed")));});
+    const host=$("block-script-editor");
+    blockEditor=self.monaco.editor.create(host,{value:$("block-script").value,language:"lua",theme:"vs-dark",automaticLayout:true,minimap:{enabled:false},scrollBeyondLastLine:false,fixedOverflow:true,fontSize:12,lineHeight:1.55,renderLineHighlight:"none",contextmenu:false});
+    $("block-script").hidden=true;host.hidden=false;
+    blockEditor.onDidChangeModelContent(()=>{clearTimeout(scriptCheckTimer);scriptCheckTimer=setTimeout(checkScriptDraft,500);});
+    checkScriptDraft();
+  }catch{blockEditor=null;/* keep the textarea; no in-game console noise */}
+}
+async function checkScriptDraft(){
+  if(!blockEditor||!authenticated)return;
+  const src=blockEditor.getValue();
+  const model=blockEditor.getModel();
+  if(!src.trim()){self.monaco.editor.setModelMarkers(model,"ac-lua",[]);return;}
+  try{
+    const res=await api("/api/block/script-check",{method:"POST",body:JSON.stringify({script:src})});
+    self.monaco.editor.setModelMarkers(model,"ac-lua",res&&res.ok?[]:[{
+      startLineNumber:(res&&res.line)||1,endLineNumber:(res&&res.line)||1,
+      severity:self.monaco.MarkerSeverity.Error,message:(res&&res.error)||"Syntax error."}]);
+  }catch{/* unreachable server: leave the last markers; submit still validates */}
+}
+$("block-form").addEventListener("focusin",mountBlockEditor,{once:true});
 function resetBlockAppearance(){
   blockTextureField.set(null);
   blockTextureTopField.set(null);
   blockTextureBottomField.set(null);
-  $("block-model").value="";$("block-script").value="";
+  $("block-model").value="";setScriptValue("");
 }
 function modelLabel(model){
   return model.replace(/^dve_/,"").replace(/_/g," ").replace(/\b[a-z]/g,c=>c.toUpperCase());
@@ -845,7 +881,7 @@ $("block-form").addEventListener("submit",async e=>{
   e.preventDefault();if(!authenticated){openAuth("login");toast("Log in to publish a block.");return;}
   const rules={support:$("block-support").value,incompatibleWith:$("block-incompatible").value.split(",").map(x=>x.trim().toLowerCase()).filter(Boolean)};
   const common={name:$("block-name").value,hardness:Number($("block-hardness").value),light:Number($("block-light").value),colour:$("block-colour").value,behaviour:$("block-behaviour").value,rules,
-    texture:blockTextureField.value(),texture_top:blockTextureTopField.value(),texture_bottom:blockTextureBottomField.value(),model:$("block-model").value||null,script:$("block-script").value.trim()||null,
+    texture:blockTextureField.value(),texture_top:blockTextureTopField.value(),texture_bottom:blockTextureBottomField.value(),model:$("block-model").value||null,script:scriptValue().trim()||null,
     drop_item_id:$("block-drop-item").value||null,drop_qty:Number($("block-drop-qty").value)||1};
   try{
     if(editingBlockId){
@@ -875,7 +911,7 @@ function enterEditMode(block){
   blockTextureField.set(block.texture||null);
   blockTextureTopField.set(block.texture_top||null);
   blockTextureBottomField.set(block.texture_bottom||null);
-  $("block-model").value=block.model||"";$("block-script").value=block.script||"";
+  $("block-model").value=block.model||"";setScriptValue(block.script||"");
   $("block-drop-item").value=block.drop_item_id||"";$("block-drop-qty").value=block.drop_qty??1;
   $("block-namespace").readOnly=true;$("block-id").readOnly=true;
   $("block-edit-note").hidden=false;$("block-edit-id").textContent=block.id;
