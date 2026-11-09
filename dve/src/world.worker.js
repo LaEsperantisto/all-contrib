@@ -17,6 +17,7 @@ import { WorldSimulationTools } from "@divinevoxel/vlox/WorldSimulation/Internal
 import { SnapShots } from "@divinevoxel/vlox/World/SnapShot/SnapShots";
 import { SectionSnapShot } from "@divinevoxel/vlox/World/SnapShot/SectionSnapShot";
 import { VoxelLUT } from "@divinevoxel/vlox/Voxels/Data/VoxelLUT";
+import { GeometryLUT } from "@divinevoxel/vlox/Voxels/Data/GeometryLUT";
 import { VoxelTagsRegister } from "@divinevoxel/vlox/Voxels/Data/VoxelTagsRegister";
 import { SectionStateDefaultTicks } from "@divinevoxel/vlox/World/Section/SectionState.js";
 import { ensureRecord, healVoxelTags, installLUTSync } from "./lut-repair.js";
@@ -1043,4 +1044,19 @@ Threads.registerTask("debug-state", async () => {
     out.err = String(e && e.message || e);
   }
   return [out];
+});
+
+// Which picture the synced geometry record says each face of a voxel wears.
+// Answers "why is that face that colour" from the tables every thread shares.
+Threads.registerTask("voxel-dbg", (name) => {
+  const V = VoxelLUT, G = GeometryLUT;
+  let id;
+  try { id = V.voxelIds.getNumberId(name); } catch { return ["lookup-threw"]; }
+  if (id === undefined || id === null) {
+    const pal = V.voxelIds._palette || [];
+    return ["no-voxel", pal.filter(p => String(p).includes(String(name).slice(0, 6))).slice(0, 10)];
+  }
+  const gidx = V.geometryIndex[id];
+  return [[id, gidx, G.geometryIndex[gidx], G.compiledGeometry[gidx] && G.compiledGeometry[gidx].length,
+    G.geometryInputs[gidx], G.geometryInputs[G.geometryInputsIndex[gidx]]]];
 });

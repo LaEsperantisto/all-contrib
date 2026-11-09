@@ -11,6 +11,7 @@ import { healVoxelTags } from "./lut-repair.js";
 import { VoxelBuildSpace } from "@divinevoxel/vlox/Builder/VoxelBuildSpace";
 import { PaintVoxelData } from "@divinevoxel/vlox/Voxels";
 import { VoxelLUT } from "@divinevoxel/vlox/Voxels/Data/VoxelLUT";
+import { GeometryLUT } from "@divinevoxel/vlox/Voxels/Data/GeometryLUT";
 import { SLAB, voxelIdFor, baseBlock } from "./world.js";
 // Re-exported so app.js can resolve live cells (walk surface, blockAt) with
 // the same terrain mirror the generator uses.
@@ -977,7 +978,19 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
   // Diagnostics/testing handle (pixel reads, mesh counts, camera in checks).
   // `frame` lets a harness drive physics without depending on rAF scheduling.
   window.__dve = { engine, scene, camera, DVER, buildSpace, counts: __dveCounts, errors: __dveErrors, genCell: () => genCell, frame,
-    aim: (y, p) => { yaw = y; pitch = clamp(p, -1.52, 1.52); camera.rotation.y = yaw; camera.rotation.x = pitch; } };
+    aim: (y, p) => { yaw = y; pitch = clamp(p, -1.52, 1.52); camera.rotation.y = yaw; camera.rotation.x = pitch; },
+    // What the compiled geometry record for a voxel says each face wears.
+    dbgVoxel: (name) => {
+      const V = VoxelLUT, G = GeometryLUT;
+      let id;
+      try { id = V.voxelIds.getNumberId(name); } catch { return ["lookup-threw", String(name)]; }
+      if (id === undefined || id === null) return ["no-voxel", (V.voxelIds._palette || []).filter(k => String(k).includes(String(name).slice(0, 6))).slice(0, 12)];
+      const gidx = V.geometryIndex[id];
+      return [[id, gidx, V.models._palette[V.modelsIndex[id]], V.totalStates && V.totalStates[id],
+        G.compiledGeometry[gidx] && G.compiledGeometry[gidx].length,
+        G.geometryInputs[gidx], G.geometryInputs[G.geometryInputsIndex[gidx]]]];
+    },
+    dbgTexIds: () => textureData.map(t => t.id).slice(0, 40) };
 
   const view = {
     /** Apply one server-authoritative edit to a single voxel. */

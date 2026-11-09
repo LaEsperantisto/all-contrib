@@ -1,1 +1,1 @@
-export const DVE_REV = {"dve-view.js":"538dd82ffb","world.worker.js":"b857560240","generator.worker.js":"11db7bc93e","mesher.worker.js":"c12acad941"};
+export const DVE_REV = {"dve-view.js":"981cb0b728","world.worker.js":"459f9762d8","generator.worker.js":"11db7bc93e","mesher.worker.js":"781628580f"};

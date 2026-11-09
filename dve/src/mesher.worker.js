@@ -4,6 +4,7 @@ import { StartMesher } from "@divinevoxel/vlox/Init/StartMesher";
 import { Threads } from "@amodx/threads";
 import { healVoxelTags, installLUTSync } from "./lut-repair.js";
 import { VoxelLUT } from "@divinevoxel/vlox/Voxels/Data/VoxelLUT";
+import { GeometryLUT } from "@divinevoxel/vlox/Voxels/Data/GeometryLUT";
 import { VoxelSchemas } from "@divinevoxel/vlox/Voxels/State/VoxelSchemas";
 import { VoxelTagsRegister } from "@divinevoxel/vlox/Voxels/Data/VoxelTagsRegister";
 
@@ -51,3 +52,19 @@ Threads.registerTask("lut-stats", () => {
 });
 
 Threads.registerTask("mesh-stats", () => [[counts, merrs]]);
+
+// Which pictures the mesher actually believes each face of a voxel wears.
+// Answers the "why is that face that colour" question without rebuilding the
+// palette by hand: it walks the voxel's geometry record and prints the face →
+// texture-input bindings the mesh will bake.
+Threads.registerTask("voxel-dbg", (name) => {
+  const V = VoxelLUT, G = GeometryLUT;
+  const pal = V.voxelIds._palette || [];
+  const i = pal.indexOf(name);
+  if (i < 0) return ["no-voxel", pal.filter(p => String(p).includes(name) || String(name).includes(p)).slice(0, 8)];
+  const gidx = V.geometryIndex[i];
+  const direct = G.geometryInputs[gidx];
+  const indirect = G.geometryInputs[G.geometryInputsIndex[gidx]];
+  const nodes = G.compiledGeometry[gidx];
+  return [[i, gidx, nodes && nodes.length, direct, indirect]];
+});
