@@ -6,6 +6,7 @@ import { WorldGeneration } from "@divinevoxel/vlox/Tasks/WorldGeneration/WorldGe
 import { WorldSpaces } from "@divinevoxel/vlox/World/WorldSpaces";
 import { Threads } from "@amodx/threads";
 import { VoxelTagsRegister } from "@divinevoxel/vlox/Voxels/Data/VoxelTagsRegister";
+import { VoxelLUT } from "@divinevoxel/vlox/Voxels/Data/VoxelLUT";
 import { SLAB, baseBlock, voxelIdFor } from "./world.js";
 import { healVoxelTags, installLUTSync } from "./lut-repair.js";
 
@@ -37,6 +38,14 @@ Threads.registerTask = (name, cb) => wrapT(name, counted(name, cb));
 // so don't send our config through it). The fragment is `apiBase \0 worldId`:
 // the region fetch must replay the joined world's edits, not the global one's.
 const [API_BASE, WORLD_ID] = decodeURIComponent(location.hash.slice(1)).split("\u0000");
+
+// True when this thread can paint `vid`: its palette entry resolves to a
+// composite id and that id has a tag record. VoxelTags is keyed numerically
+// (BuildTagData writes tags[getNumberId(id)]), never by the string id.
+const taggedVid = (vid) => {
+  const n = VoxelLUT.voxelIds.getNumberId(vid);
+  return n >= 0 && !!VoxelTagsRegister.VoxelTags[n];
+};
 
 class ACWorldGen {
   static instance;
@@ -95,15 +104,18 @@ class ACWorldGen {
           // with a palette entry but no tag yet, and the throw loses the
           // WHOLE chunk task: every later sector near it never streams.
           // Heal once on the first miss, recheck, and skip a cell that still
-          // has no repairable record.
+          // has no repairable record. VoxelTags is keyed by NUMERIC composite
+          // id (BuildTagData writes tags[getNumberId(id)]) - indexing it by
+          // the string id is always undefined, which skipped EVERY cell and
+          // left the whole world invisible with zero errors.
           let vid = voxelIdFor(id);
-          if (vid == null || !VoxelTagsRegister.VoxelTags[vid]) {
+          if (vid == null || !taggedVid(vid)) {
             if (!healed) {
               healed = true;
               try { healVoxelTags(); } catch { /* mid-transfer */ }
             }
             vid = voxelIdFor(id);
-            if (vid == null || !VoxelTagsRegister.VoxelTags[vid]) continue;
+            if (vid == null || !taggedVid(vid)) continue;
           }
           brush.setId(vid).setXYZ(x, y, z).paint();
         }
