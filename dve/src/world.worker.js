@@ -861,6 +861,39 @@ let snapLog = [], snapTotal = 0, snapEmpty = 0;
     return ocs.apply(this, arguments);
   };
 }
+{
+  // vlox's async unload task tears a sector down without looking at its
+  // checked-out state: the sector-buffer pool zeroes the world-side
+  // bufferView on return, which throws a TypeError when that buffer is
+  // currently transferred to a generator thread. The rejection escapes
+  // unhandled, the registry drops the sector while a thread still owns it,
+  // and every later paint/brush round trip for that cell dies - observed
+  // as edit repaints silently going stale after walk + edit storms
+  // ("Cannot perform %TypedArray%.prototype.fill on a detached or
+  // out-of-bounds ArrayBuffer"). Defer the unload while the sector is
+  // checked out; the task queue retries it, and the maintenance free path
+  // (checked-in only) cleans up any leftover.
+  const our = WorldSimulationTasks.unloadTasks.run;
+  WorldSimulationTasks.unloadTasks.run = function (dimension, location, taskId, task) {
+    const sector = WorldRegister.sectors.get(...location);
+    if (sector && co(sector)) return;
+    return our.apply(this, arguments);
+  };
+  // The task-entry check races: a generator checkout can start while the
+  // unload's `await` is in flight, so the pool return is also gated here at
+  // the single choke point. Skipping a return only costs a pool buffer.
+  const pools = WorldRegister._pools;
+  const rs = pools.returnSector;
+  pools.returnSector = function (sector) {
+    let det = false;
+    try { det = !!sector.bufferView?.buffer?.detached; } catch { det = true; }
+    if (det || co(sector)) {
+      if (werrs.length < 24) werrs.push("returnSector:skipped:" + (det ? "detached" : "checkedout"));
+      return;
+    }
+    return rs.apply(this, arguments);
+  };
+}
 
 // Diagnostics: what the re-mesh machinery saw (snapshots taken, queued bumps).
 Threads.registerTask("lut-stats", () => {
@@ -876,6 +909,9 @@ Threads.registerTask("lut-stats", () => {
 });
 
 Threads.registerTask("remesh-stats", () => [[snapTotal, snapEmpty, snapLog.slice(-8), pendingRemesh.size]]);
+// The worker's own uncaught errors/rejections, with stacks (see the
+// self.addEventListener handlers above). Diagnostics for live debugging.
+Threads.registerTask("werrs", () => [[werrs.slice(0, 24)]]);
 
 // The snapshot hand-off is the fragile link of the re-mesh path: a section
 // buffer that got detached (checked out elsewhere) makes the payload transfer

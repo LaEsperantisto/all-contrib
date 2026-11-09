@@ -12,7 +12,7 @@ import { healVoxelTags, installLUTSync } from "./lut-repair.js";
 const gcounts = {};
 const gerrs = [];
 self.addEventListener("error", e => gerrs.push("worker-error: " + (e.message || "unknown")));
-self.addEventListener("unhandledrejection", e => gerrs.push("rejection: " + String(e.reason && e.reason.message || e.reason)));
+self.addEventListener("unhandledrejection", e => gerrs.push("rejection: " + String(e.reason && e.reason.stack || e.reason).slice(0, 700)));
 // Missed binary task ids (dropped dispatches): patch the lookup map.
 import { InternalTasks } from "@amodx/threads/Internal/InternalTasks.js";
 const misses = [];
@@ -120,6 +120,8 @@ Threads.registerTask("gen-stats", () => {
     return [[gcounts, gerrs.slice(0, 8), binKeys, misses]];
   }
 });
+// This thread's uncaught errors with stacks, for live diagnosis.
+Threads.registerTask("gerrs", () => [[gerrs.slice(0, 16), misses.slice(0, 8)]]);
 
 // Keep the generator's edit mirror current with the live world: cells that
 // generate AFTER an edit (far cells streamed in later) must see it too.
