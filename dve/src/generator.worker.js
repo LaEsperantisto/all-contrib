@@ -33,8 +33,9 @@ Threads.registerBinaryTask = (name, cb) => wrapB(typeof name == "string" ? { id:
 Threads.registerTask = (name, cb) => wrapT(name, counted(name, cb));
 
 // API base is passed as the worker URL fragment (threadcomm owns postMessage,
-// so don't send our config through it).
-const API_BASE = decodeURIComponent(location.hash.slice(1));
+// so don't send our config through it). The fragment is `apiBase \0 worldId`:
+// the region fetch must replay the joined world's edits, not the global one's.
+const [API_BASE, WORLD_ID] = decodeURIComponent(location.hash.slice(1)).split("\u0000");
 
 class ACWorldGen {
   static instance;
@@ -53,7 +54,7 @@ class ACWorldGen {
   async loadEdits() {
     this.edits = new Map();
     try {
-      const url = `${API_BASE}/api/world?x0=${SLAB.X0}&y0=${SLAB.Y0}&z0=${SLAB.Z0}&x1=${SLAB.X1 - 1}&y1=${SLAB.Y1 - 1}&z1=${SLAB.Z1 - 1}`;
+      const url = `${API_BASE}/api/world?x0=${SLAB.X0}&y0=${SLAB.Y0}&z0=${SLAB.Z0}&x1=${SLAB.X1 - 1}&y1=${SLAB.Y1 - 1}&z1=${SLAB.Z1 - 1}&server=${encodeURIComponent(WORLD_ID || "global")}`;
       const res = await fetch(url);
       if (!res.ok) return;
       const data = await res.json();

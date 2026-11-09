@@ -1618,6 +1618,7 @@ async function initGameView(){
   }catch{/* default spawn on surface */}
   dveView=await dveMod.createDVEView($("game-canvas"),currentBlocks,API_BASE,{
     settings:viewSettings(),
+    serverId:settings.serverId,
     cellAt:(x,y,z)=>cellBlock(x,y,z),
     spawn:spawn||undefined,
     // No saved position: pick a spawn column of our own so two players who

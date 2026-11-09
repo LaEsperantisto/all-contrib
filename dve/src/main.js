@@ -429,11 +429,14 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
   });
 
   // The generator worker fetches initial edits from the API; threadcomm owns
-  // postMessage, so hand it the API base through the worker URL fragment.
+  // postMessage, so hand it the API base through the worker URL fragment. The
+  // world id rides along for the same reason: /api/world answers for a world,
+  // and a page joined to a private or staging world must replay THAT world's
+  // edits, never the global one's.
   const workerURL = name => {
     const url = new URL(`./${name}`, import.meta.url);
     url.search = `h=${DVE_REV[name]}`;
-    url.hash = encodeURIComponent(apiBase);
+    url.hash = encodeURIComponent(`${apiBase}\u0000${opts.serverId || "global"}`);
     return url;
   };
   const worldWorker = new Worker(workerURL("world.worker.js"), { type: "module" });
