@@ -5,6 +5,7 @@ import { StartGenerator } from "@divinevoxel/vlox/Init/StartGenerator";
 import { WorldGeneration } from "@divinevoxel/vlox/Tasks/WorldGeneration/WorldGeneration";
 import { WorldSpaces } from "@divinevoxel/vlox/World/WorldSpaces";
 import { Threads } from "@amodx/threads";
+import { VoxelTagsRegister } from "@divinevoxel/vlox/Voxels/Data/VoxelTagsRegister";
 import { SLAB, baseBlock, voxelIdFor } from "./world.js";
 import { healVoxelTags, installLUTSync } from "./lut-repair.js";
 
@@ -68,6 +69,9 @@ class ACWorldGen {
     }
     // WS echoes that raced ahead of this fetch: replay them over the snapshot.
     for (const n of this.pendingNotes) this.edits.set(`${n.x},${n.y},${n.z}`, n.block_id);
+    // The snapshot can carry beacons and published blocks: give their ids a
+    // tag before the first chunk that paints one is generated.
+    try { healVoxelTags(); } catch { /* mid-transfer */ }
     this.pendingNotes.length = 0;
   }
 
@@ -79,12 +83,29 @@ class ACWorldGen {
     const yLo = Math.max(sy, SLAB.Y0), yHi = Math.min(sy + b.y, SLAB.Y1);
     if (xHi <= xLo || zHi <= zLo || yHi <= yLo) return;
     const brush = this.brush;
+    let healed = false;
     for (let x = xLo; x < xHi; x++) {
       for (let z = zLo; z < zHi; z++) {
         for (let y = yLo; y < yHi; y++) {
           const id = this.edits.get(`${x},${y},${z}`) ?? baseBlock(x, y, z);
           if (id === "air") continue;
-          brush.setId(voxelIdFor(id)).setXYZ(x, y, z).paint();
+          // Brush.paint's lighting pass reads the voxel's tag (`isOpaque` ->
+          // `dve_is_transparent`). Names the terrain never generates - the
+          // beacon, anything published after this thread booted - can arrive
+          // with a palette entry but no tag yet, and the throw loses the
+          // WHOLE chunk task: every later sector near it never streams.
+          // Heal once on the first miss, recheck, and skip a cell that still
+          // has no repairable record.
+          let vid = voxelIdFor(id);
+          if (vid == null || !VoxelTagsRegister.VoxelTags[vid]) {
+            if (!healed) {
+              healed = true;
+              try { healVoxelTags(); } catch { /* mid-transfer */ }
+            }
+            vid = voxelIdFor(id);
+            if (vid == null || !VoxelTagsRegister.VoxelTags[vid]) continue;
+          }
+          brush.setId(vid).setXYZ(x, y, z).paint();
         }
       }
     }
@@ -129,6 +150,10 @@ Threads.registerTask("note-edit", (d) => {
   const g = ACWorldGen.instance;
   if (!g.edits) { g.pendingNotes.push(d); return [true]; }
   g.edits.set(`${d.x},${d.y},${d.z}`, d.block_id);
+  // The placed block's id may not have a tag here yet; heal now so the next
+  // generate() that paints the cell finds a complete record (the paint itself
+  // would throw deep in vlox's lighting pass).
+  if (d.block_id && d.block_id !== "air") { try { healVoxelTags(); } catch { /* mid-transfer */ } }
   return [true];
 });
 
