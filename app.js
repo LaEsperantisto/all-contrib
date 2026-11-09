@@ -1830,8 +1830,13 @@ async function boot(){
       // a stale hash and the browser serves an old engine from cache. The map
       // itself is a few hundred bytes, so bust it per page load and let the
       // hashed bundles keep their long-lived caching.
-      const { DVE_REV } = await import(`./dve/dist/rev.js?n=${Date.now()}`);
-      dveMod = await import(`./dve/dist/dve-view.js?h=${DVE_REV["dve-view.js"]}`);
+      // Absolute page-origin URLs: app.js itself may be served from a CDN, and
+      // relative specifiers here would resolve against the CDN - dve-view.js
+      // then spawns its workers from the CDN URL, and cross-origin Worker()
+      // is a SecurityError. The engine always comes from the site's own origin.
+      const localBase = location.href.replace(/[^/]*$/, "");
+      const { DVE_REV } = await import(`${localBase}dve/dist/rev.js?n=${Date.now()}`);
+      dveMod = await import(`${localBase}dve/dist/dve-view.js?h=${DVE_REV["dve-view.js"]}`);
       await refreshRegistry();      // textures come from the block registry
       await loadWorldAll();         // player edits made before this session
       await initGameView();
