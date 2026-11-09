@@ -1160,6 +1160,10 @@ $("pause-studio").addEventListener("click",()=>$("studio-dialog").showModal());
 // truth the moment they look.
 function openAdminPanel(){
   if(!canControlWorld()){toast("Only the admin or the owner of this server has these settings.",true);return false;}
+  // Re-read the labels here: at sign-in the server list may not have arrived
+  // yet, and an owner who booted straight into their own world would otherwise
+  // wear the admin's labels and lose the resync button.
+  renderAdminTools();
   renderTimePanel();
   $("admin-panel").showModal();
   void syncClock();
