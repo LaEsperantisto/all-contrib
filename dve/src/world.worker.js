@@ -491,6 +491,13 @@ Threads.registerTask("paint-direct", async ([loc, raw, id]) => {
       // and a name with no encode entry writes 0 (air) with no error at all —
       // without this check a failed placement looks like a successful one.
       const back = brush.dataCursor.getVoxel(loc[1], loc[2], loc[3]);
+      if (id === "dve_air" && !back) {
+        // Already air: air-on-air is the desired end-state. Without this the
+        // loop burns all 40 retries (a named id writing 0 is a FAILURE - LUT
+        // encode miss - and must keep falling through).
+        queueRemesh(loc[1], loc[2], loc[3]);
+        return "ok";
+      }
       if (back) {
         back.process();
         const got = back.getStringId();
@@ -506,6 +513,19 @@ Threads.registerTask("paint-direct", async ([loc, raw, id]) => {
       }
     } catch (e) {
       last = String(e && e.message).slice(0, 90);
+      // vlox throws ("Tried to run tick update on voxel that does not exist")
+      // when a break next to a sim voxel schedules a tick on a cell that is
+      // already air - but the data write happened before the throw. If the
+      // cell reads back at the wanted state the task contract is met: remesh
+      // and be done. (Skipped wake-up is harmless: our sea is a column model,
+      // no flow sim is relied on anywhere; see disclosure ledger.)
+      try {
+        const back2 = WorldSimulation.getDimension(0).getBrush().dataCursor.getVoxel(loc[1], loc[2], loc[3]);
+        if ((id === "dve_air" && !back2) || (back2 && back2.getStringId() === id)) {
+          queueRemesh(loc[1], loc[2], loc[3]);
+          return "ok";
+        }
+      } catch { /* sector mid-transfer; keep retrying */ }
     }
     await new Promise(r => setTimeout(r, 250));
   }
