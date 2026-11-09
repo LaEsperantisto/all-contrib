@@ -535,6 +535,7 @@ async function refreshRegistry(){
     currentBlocks=Array.isArray(blocks.blocks)?blocks.blocks:[];
     currentItems=Array.isArray(items.items)?items.items:[];
     currentRecipes=Array.isArray(recipes.recipes)?recipes.recipes:[];
+    renderDropItemOptions();
     renderInventory();renderCrafting();renderMyBlocks();renderMyItems();renderMyRecipes();renderItemProgramSelect();
   }catch(err){
     setConnection(false);currentBlocks=[];currentItems=[];currentRecipes=[];
@@ -828,13 +829,24 @@ function setModelOptions(models){
   $("block-model").innerHTML='<option value="">Full cube (default)</option>'+
     list.map(m=>`<option value="${escapeAttr(m)}">${escapeHtml(modelLabel(m))}</option>`).join("");
 }
+// The drop dropdown: every known item, empty value = the implicit default.
+// The current selection survives registry refreshes (an edit in progress
+// must not lose its chosen drop when a background refresh lands).
+function renderDropItemOptions(){
+  const sel=$("block-drop-item");if(!sel)return;
+  const keep=sel.value;
+  sel.innerHTML='<option value="">Default (the programming item)</option>'+
+    currentItems.map(i=>`<option value="${escapeAttr(i.id)}">${escapeHtml(i.name)}</option>`).join("");
+  if([...sel.options].some(o=>o.value===keep))sel.value=keep;
+}
 let editingBlockId=null;
 const pendingDelete=new Set();
 $("block-form").addEventListener("submit",async e=>{
   e.preventDefault();if(!authenticated){openAuth("login");toast("Log in to publish a block.");return;}
   const rules={support:$("block-support").value,incompatibleWith:$("block-incompatible").value.split(",").map(x=>x.trim().toLowerCase()).filter(Boolean)};
   const common={name:$("block-name").value,hardness:Number($("block-hardness").value),light:Number($("block-light").value),colour:$("block-colour").value,behaviour:$("block-behaviour").value,rules,
-    texture:blockTextureField.value(),texture_top:blockTextureTopField.value(),texture_bottom:blockTextureBottomField.value(),model:$("block-model").value||null,script:$("block-script").value.trim()||null};
+    texture:blockTextureField.value(),texture_top:blockTextureTopField.value(),texture_bottom:blockTextureBottomField.value(),model:$("block-model").value||null,script:$("block-script").value.trim()||null,
+    drop_item_id:$("block-drop-item").value||null,drop_qty:Number($("block-drop-qty").value)||1};
   try{
     if(editingBlockId){
       await api(`/api/blocks/${encodeURIComponent(editingBlockId)}`,{method:"PUT",body:JSON.stringify(common)});
@@ -843,7 +855,7 @@ $("block-form").addEventListener("submit",async e=>{
     }else{
       await api("/api/blocks",{method:"POST",body:JSON.stringify({...common,namespace:$("block-namespace").value,id:$("block-id").value})});
       toast("Block published to the registry. It becomes placeable immediately; textures reload on next visit.");
-      e.target.reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";resetBlockAppearance();updateIdPreview();
+      e.target.reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";resetBlockAppearance();updateIdPreview();$("block-drop-item").value="";$("block-drop-qty").value=1;
     }
     await refreshRegistry();
   }
@@ -864,6 +876,7 @@ function enterEditMode(block){
   blockTextureTopField.set(block.texture_top||null);
   blockTextureBottomField.set(block.texture_bottom||null);
   $("block-model").value=block.model||"";$("block-script").value=block.script||"";
+  $("block-drop-item").value=block.drop_item_id||"";$("block-drop-qty").value=block.drop_qty??1;
   $("block-namespace").readOnly=true;$("block-id").readOnly=true;
   $("block-edit-note").hidden=false;$("block-edit-id").textContent=block.id;
   $("block-form-title").textContent="Edit block";$("block-form-sub").textContent="Changes apply to the live registry.";
@@ -1563,10 +1576,12 @@ async function worldAction(button,x,y,z){
     if(button===2){
       const data=await api("/api/world/break",{method:"POST",body:JSON.stringify(srvBody({x,y,z}))});
       // A scripted block can speak as it dies, and its store comes out with it:
-      // the toast says what actually landed in the bag, not a guess.
-      const bits=[`Broke ${data.dropped} at ${x} ${y} ${z}`];
-      const got=[`1 ${data.dropped}`,...(data.contents||[]).map(c=>`${c.qty} ${c.item}`)].join(", ");
-      bits.push(`+${got}`);
+      // the toast says what actually landed in the bag, not a guess — the
+      // declared drop quantity included, and no phantom line when the block
+      // drops nothing at all (base-terrain-only blocks).
+      const bits=[data.dropped?`Broke ${data.dropped} at ${x} ${y} ${z}`:`Broke that at ${x} ${y} ${z}`];
+      const got=[...(data.dropped?[`${data.drop_qty??1} ${data.dropped}`]:[]),...(data.contents||[]).map(c=>`${c.qty} ${c.item}`)];
+      if(got.length)bits.push(`+${got.join(", ")}`);
       const said=((data.toasts||[]).join(" ")).trim();
       toast(said?`${bits.join(" — ")} — ${said}`:`${bits.join(" — ")}.`);
     }else{

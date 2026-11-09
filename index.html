@@ -241,6 +241,12 @@
             <label>Support<select id="block-support"><option value="any" selected>Any empty cell</option><option value="solid">Needs solid below</option><option value="none">Needs empty below</option></select></label>
             <label>Incompatible IDs <span class="optional">comma-separated; placement refuses next to these</span><input id="block-incompatible" placeholder="builtin:stone, …" autocomplete="off" spellcheck="false"></label>
           </div>
+          <div class="form-row">
+            <label>Drops <span class="optional">what breaking it yields</span>
+              <select id="block-drop-item"><option value="">Default (the programming item)</option></select>
+            </label>
+            <label>Drop quantity<input id="block-drop-qty" type="number" min="1" max="99" value="1"></label>
+          </div>
           <div class="edit-note" id="block-edit-note" hidden>Editing <code id="block-edit-id"></code> — the ID cannot change. <button type="button" id="block-edit-cancel" class="text-button">Cancel edit</button></div>
           <div class="field-group">
             <h3 class="field-group-title">Look and programming <span class="optional">optional</span></h3>
@@ -333,6 +339,6 @@
   </dialog>
 
   <div id="toast" role="status" class="toast"></div>
-  <script src="./app.js?v=27"></script>
+  <script src="./app.js?v=28"></script>
 </body>
 </html>
