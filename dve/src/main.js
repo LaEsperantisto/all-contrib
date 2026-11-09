@@ -327,7 +327,13 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
   // is not an opaque cube — air and blocks that drew with a transparent model.
   const seeThru = new Set(["dve_air"]);
   const emits = new Map(); // voxel id -> light level from the registry
+  // Every block id this view can actually paint: the vlox palette only knows
+  // what this feed defined, and an edit for anything else throws deep in the
+  // engine's voxel lookup. Blocks published after the view was created are in
+  // that category until the next join rebuilds it.
+  const definedBlockIds = new Set();
   for (const b of blocks) {
+    definedBlockIds.add(b.id);
     const vid = voxelIdFor(b.id);
     if (seen.has(vid)) continue;
     seen.add(vid);
@@ -1002,6 +1008,11 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     dbgTexIds: () => textureData.map(t => t.id).slice(0, 40) };
 
   const view = {
+    /** Can this view paint `blockId`? False for blocks published after it
+        was created (the vlox palette only knows the registry it was fed). */
+    knowsBlock(blockId) {
+      return blockId === null || blockId === undefined || blockId === "air" || definedBlockIds.has(String(blockId));
+    },
     /** Apply one server-authoritative edit to a single voxel. */
     async applyEdit(x, y, z, blockId) {
       if (x < SLAB.X0 || x >= SLAB.X1 || y < SLAB.Y0 || y >= SLAB.Y1 || z < SLAB.Z0 || z >= SLAB.Z1) return;

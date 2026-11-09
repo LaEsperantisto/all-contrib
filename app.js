@@ -1336,12 +1336,19 @@ grabBtn.addEventListener("click",()=>{if(dveView)dveView.grabPointer();});
 const worldEdits=new Map();
 let headSeq=0,ws=null,wsRetry=0,hadSocket=false,dveView=null,dveMod=null;
 let worldBeams=[];
+let lastBeamStamp="";
+let wsBeamSeq=0; // counts ws-delivered beam frames; catches in-flight poll races
 const lastWsFailed=()=>ws&&(ws.readyState===2||ws.readyState===3);
 function cellBlock(x,y,z){const o=worldEdits.get(`${x},${y},${z}`);return o!==undefined?o:dveMod.baseBlock(x,y,z);}
 // Single funnel for world edits: paint the voxel in the 3D view.
 function noteEdit(x,y,z,blockId){
   worldEdits.set(`${x},${y},${z}`,blockId);
-  if(dveView)dveView.applyEdit(x,y,z,blockId);
+  if(!dveView)return;
+  // The edit log outlives the blocks it names: a custom block published in one
+  // session and deleted later still has log rows, and the engine throws on a
+  // block id its palette never met. Skip the paint, keep the bookkeeping.
+  if(!dveView.knowsBlock(blockId))return;
+  dveView.applyEdit(x,y,z,blockId);
 }
 async function loadWorldAll(){
   const S=dveMod.SLAB;
@@ -1352,6 +1359,7 @@ async function loadWorldAll(){
     // Light columns switched on by scripted blocks: cached because this runs
     // before the view exists on first join, then replayed into it.
     worldBeams=Array.isArray(data.beams)?data.beams:[];
+    lastBeamStamp=data.beamStamp||"";
     if(dveView)for(const b of worldBeams)dveView.setBeam(b.x,b.y,b.z,b.colour);
     headSeq=Math.max(headSeq,data.head);
     setConnection(true);
@@ -1430,7 +1438,7 @@ function connectLive(){
     }
     else if(m.type==="down"&&dveView)dveView.setDown(m.name,true);
     else if(m.type==="up"&&dveView)dveView.setDown(m.name,false);
-    else if(m.type==="beam"&&dveView)dveView.setBeam(m.x,m.y,m.z,m.colour||null);
+    else if(m.type==="beam"&&dveView){wsBeamSeq++;dveView.setBeam(m.x,m.y,m.z,m.colour||null);}
     // A block script moved this player. Keep the look, replace the body; the
     // server has already written the position, so the next presence frame just
     // confirms where the client now stands.
@@ -1603,8 +1611,30 @@ async function eatSelected(){
     toast(`Ate ${meta.name}.`);
   }catch(err){toast(err.message,true);}
 }
-// While the socket is down, polling (since=headSeq) fills the gap.
-setInterval(()=>{if(!ws||ws.readyState>1)loadWorldAll();},4000);
+// While the socket is down, polling (since=headSeq) fills the gap. While it is
+// UP, light columns are the one thing a lost broadcast frame never heals: the
+// log replay carries edits but not beams. So the same 4 s beat also asks the
+// cheap stamp endpoint — only when the stamp moved does the (≤400 row) beam
+// list get re-diffed against what the engine is actually drawing.
+setInterval(()=>{if(!ws||ws.readyState>1)loadWorldAll();else void beamCatchup();},4000);
+async function beamCatchup(){
+  const seq=wsBeamSeq;
+  let data=null;
+  try{data=await api(`/api/world/beams?server=${encodeURIComponent(settings.serverId)}`);}
+  catch(err){if(err&&err.status===403)return;return;}
+  if(!data||!Array.isArray(data.beams)||data.beamStamp===lastBeamStamp)return;
+  // A ws beam frame landed while this list was in flight: the frames are the
+  // fresher signal, so drop this batch instead of repainting a stale beam.
+  if(wsBeamSeq!==seq)return;
+  lastBeamStamp=data.beamStamp;
+  worldBeams=data.beams;
+  if(!dveView)return;
+  // Ask the engine what it is drawing, not what we last read — a column whose
+  // removal frame never arrived is absent from worldBeams but still glowing.
+  for(const [x,y,z] of dveView.beamCells())
+    if(!worldBeams.some(n=>n.x===x&&n.y===y&&n.z===z))dveView.setBeam(x,y,z,null);
+  for(const b of worldBeams)dveView.setBeam(b.x,b.y,b.z,b.colour);
+}
 
 async function worldAction(button,x,y,z){
   if(!authenticated){openAuth("login");toast("Log in to build in the shared world.");return;}
