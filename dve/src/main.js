@@ -12,10 +12,10 @@ import { VoxelBuildSpace } from "@divinevoxel/vlox/Builder/VoxelBuildSpace";
 import { PaintVoxelData } from "@divinevoxel/vlox/Voxels";
 import { VoxelLUT } from "@divinevoxel/vlox/Voxels/Data/VoxelLUT";
 import { GeometryLUT } from "@divinevoxel/vlox/Voxels/Data/GeometryLUT";
-import { SLAB, voxelIdFor, baseBlock } from "./world.js";
+import { SLAB, SEA_LEVEL, voxelIdFor, baseBlock, heightAt } from "./world.js";
 // Re-exported so app.js can resolve live cells (walk surface, blockAt) with
 // the same terrain mirror the generator uses.
-export { SLAB, baseBlock };
+export { SLAB, SEA_LEVEL, baseBlock, heightAt };
 
 // Headless diagnostics: count mesher→renderer deliveries, capture cb throws
 // (a throwing cb silently never responds, pinning the sender's in-flight cap).
@@ -216,7 +216,8 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
   const solidVoxel = (bx, by, bz) => {
     if (by < SLAB.Y0 || by >= SLAB.Y1) return false;
     const id = cellAt(bx, by, bz);
-    return id !== undefined && id !== null && id !== "air";
+    // Water fills cells but is not solid: you walk through it and sink.
+    return id !== undefined && id !== null && id !== "air" && id !== "builtin:water";
   };
   const bodyBlocked = (x, feetY, z) => {
     const x0 = Math.floor(x - HALF), x1 = Math.floor(x + HALF);
@@ -254,6 +255,14 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     if (mz) { dx += Math.sin(yaw) * mz * speed * dt; dz += Math.cos(yaw) * mz * speed * dt; }
     if (mx) { dx += Math.cos(yaw) * mx * speed * dt; dz += -Math.sin(yaw) * mx * speed * dt; }
 
+    // Swimming: the cell at the body's middle (waist-ish) decides buoyancy.
+    // In water horizontal drive is damped, gravity is quartered with a slow
+    // sink cap, and Space is a short upward stroke. No drowning: the sea is
+    // still water over a sandy floor that is always within a slow sink.
+    const bodyCell = cellAt(Math.floor(camera.position.x), Math.floor(camera.position.y - 0.5), Math.floor(camera.position.z));
+    const inWater = bodyCell === "builtin:water";
+    if (inWater) { dx *= 0.6; dz *= 0.6; }
+
     // Axis-wise AABB resolution against the voxel grid: slide along walls,
     // snap flush to the face we hit.
     if (dx) {
@@ -279,8 +288,8 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
       if (f < SLAB.Y1) { camera.position.y = f + EYE + 0.001; vy = 0; }
     }
 
-    if (keys.has("Space") && grounded) { vy = JUMP_V; grounded = false; }
-    vy = Math.max(-MAX_FALL, vy - GRAVITY * dt);
+    if (keys.has("Space") && (grounded || inWater)) { vy = inWater ? 3.2 : JUMP_V; grounded = false; }
+    vy = Math.max(inWater ? -2 : -MAX_FALL, vy - (inWater ? GRAVITY * 0.25 : GRAVITY) * dt);
     let ny = camera.position.y + vy * dt;
     if (bodyBlocked(camera.position.x, ny - EYE, camera.position.z)) {
       if (vy <= 0) {
