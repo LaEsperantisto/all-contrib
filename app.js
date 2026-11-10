@@ -43,8 +43,11 @@ if (!/^[0-9a-f]{32,}$/.test(String(settings.device || ""))) {
   saveSettings();
 }
 if (!isLocalPage) settings.server = "global"; // https page → http dev API is mixed content
+// `ac_api_port` lets the offline proof harness run the local worker on a
+// spare port when the dev API already owns 8787; it only ever applies on a
+// localhost page (same gate as the local server choice itself).
 let API_BASE = settings.server === "local" && isLocalPage
-  ? `http://${location.hostname}:8787`
+  ? `http://${location.hostname}:${Number(localStorage.getItem("ac_api_port")) || 8787}`
   : "https://all-contrib.all-contrib.workers.dev";
 function updateServerChip() {
   const label = settings.serverId !== "global"
@@ -117,8 +120,12 @@ $("mm-server-list").addEventListener("change", () => {
 $("mm-server-create").addEventListener("click", () => {
   if (!authenticated) { toast("Log in to create a server.", true); return; }
   $("cs-name").value = "";
-  $("cs-visibility").value = "public";
-  $("cs-note").textContent = CS_NOTES.public;
+  // On a local run the machine IS the server and nobody else can reach it:
+  // private is the honest default, and the note says where the world lives.
+  $("cs-visibility").value = isLocalPage ? "private" : "public";
+  $("cs-note").textContent = isLocalPage
+    ? "This machine is the server: the world lives in its local database and stays on this computer."
+    : CS_NOTES.public;
   $("create-server").showModal();
 });
 $("cs-visibility").addEventListener("change", () => { $("cs-note").textContent = CS_NOTES[$("cs-visibility").value] || ""; });

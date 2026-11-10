@@ -341,6 +341,13 @@
   </dialog>
 
   <div id="toast" role="status" class="toast"></div>
-  <script src="https://cdn.jsdelivr.net/gh/LaEsperantisto/all-contrib@main/app.js?v=30"></script>
+  <script>
+  // Offline/local runs load the app from this folder; the Pages site keeps the
+  // CDN copy (jsDelivr @main). Same-origin on localhost = works with no net.
+  // document.write at the old tag's spot preserves load order.
+  document.write('<script src="' + (/^(localhost|127\.|\[?::1\]?$)/.test(location.hostname)
+    ? "./app.js"
+    : "https://cdn.jsdelivr.net/gh/LaEsperantisto/all-contrib@main/app.js?v=31") + '"><\/script>');
+  </script>
 </body>
 </html>
