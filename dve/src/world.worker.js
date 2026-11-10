@@ -479,6 +479,14 @@ Threads.registerTask("light-probe", ([x, y, z]) => {
 // locally land at the imported palette's offset), so setRaw cannot decode a
 // name from a composite raw. Main sends the palette name alongside.
 Threads.registerTask("paint-direct", async ([loc, raw, id]) => {
+  // A far REST edit (break a beach 160 blocks away while swimming in the
+  // deep pool) targets a cell whose sector the streaming ring has unloaded:
+  // every brush call throws "voxel that does not exist", the retry loop
+  // burns 40 x 250 ms, and werrs fills with a fail whose end-state is
+  // already guaranteed - the generator thread gets the same edit via
+  // note-edit, so the sector streams back with the change baked in. Paint
+  // is for the live sim copy only; nothing to paint into when it is gone.
+  if (!WorldRegister.sectors.get(loc[0], loc[1], loc[2], loc[3])) return "absent";
   let last = "";
   for (let attempt = 0; attempt < 40; attempt++) {
     try {
