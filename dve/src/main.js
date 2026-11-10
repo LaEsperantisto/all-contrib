@@ -169,7 +169,10 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     // A dead player keeps the cursor free: clicking the canvas (or through the
     // death screen's gaps) must not take the pointer lock back.
     if (!locked && !frozen && canvas.requestPointerLock) {
-      try { canvas.requestPointerLock(); } catch { /* fall back to drag-look */ }
+      // requestPointerLock returns a promise in modern Chrome; a refusal
+      // (e.g. right after an Esc-exit) rejects asynchronously and the sync
+      // catch cannot see it - swallow it and fall back to drag-look.
+      try { const p = canvas.requestPointerLock(); if (p && p.catch) p.catch(() => {}); } catch { /* fall back to drag-look */ }
     }
   });
   window.addEventListener("pointerup", () => { dragging = false; });
@@ -1313,7 +1316,9 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     /** Grab the cursor (pointer lock) for FPS look. False if refused. */
     grabPointer() {
       if (!canvas.requestPointerLock) return false;
-      try { canvas.requestPointerLock(); return true; } catch { return false; }
+      // A refusal arrives as a promise rejection (no gesture, or Chrome
+      // refusing right after an Esc-exit); swallow it, the HUD button covers.
+      try { const p = canvas.requestPointerLock(); if (p && p.catch) p.catch(() => {}); return true; } catch { return false; }
     },
 
     /** Re-fit the engine after the game overlay is un-hidden. */
