@@ -144,7 +144,7 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
   let selfAvatar = null, selfLook = null, third = false, cam3 = null;
   const applySettings = next => {
     Object.assign(settings, next || {});
-    camera.fov = clamp(settings.fov, 0.4, 1.5);
+    camera.fov = clamp(settings.fov, 0.35, 1.6);
     camera.maxZ = clamp(settings.renderDistance, 40, 4000);
     // The orbit camera reads the same window; a settings change mid-view has to
     // reach it too, not just the eye camera.
@@ -248,11 +248,18 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     const sprint = keys.has("ShiftLeft") || keys.has("ShiftRight") ||
       keys.has("ControlLeft") || keys.has("ControlRight");
     const speed = settings.speed * (sprint ? 2 : 1);
+    // Arrow keys are look, not walk: they rotate the camera at fixed rates
+    // (~100°/s yaw, ~60°/s pitch, same clamp as the mouse) so a mouse-free
+    // player can still turn their head. Walking stays WASD-only.
+    if (keys.has("ArrowLeft")) yaw -= 1.75 * dt;
+    if (keys.has("ArrowRight")) yaw += 1.75 * dt;
+    if (keys.has("ArrowUp")) pitch = clamp(pitch - 1.05 * dt, -1.52, 1.52);
+    if (keys.has("ArrowDown")) pitch = clamp(pitch + 1.05 * dt, -1.52, 1.52);
     let mx = 0, mz = 0;
-    if (keys.has("KeyW") || keys.has("ArrowUp")) mz += 1;
-    if (keys.has("KeyS") || keys.has("ArrowDown")) mz -= 1;
-    if (keys.has("KeyA") || keys.has("ArrowLeft")) mx -= 1;
-    if (keys.has("KeyD") || keys.has("ArrowRight")) mx += 1;
+    if (keys.has("KeyW")) mz += 1;
+    if (keys.has("KeyS")) mz -= 1;
+    if (keys.has("KeyA")) mx -= 1;
+    if (keys.has("KeyD")) mx += 1;
     let dx = 0, dz = 0;
     if (mz) { dx += Math.sin(yaw) * mz * speed * dt; dz += Math.cos(yaw) * mz * speed * dt; }
     if (mx) { dx += Math.cos(yaw) * mx * speed * dt; dz += -Math.sin(yaw) * mx * speed * dt; }

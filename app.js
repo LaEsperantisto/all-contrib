@@ -14,7 +14,7 @@ const $ = (id) => document.getElementById(id);
 // Local hosting includes a LAN address: opening the game from
 // http://192.168.1.20:8000 has to be able to reach that machine's API.
 const isLocalPage = /^(localhost|127\.|\[?::1\]?$|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)/.test(location.hostname);
-const DEFAULT_SETTINGS = { server: isLocalPage ? "local" : "global", serverId: "global", sens: 5, fov: 80, distance: 900, speed: 8, render: "flat" };
+const DEFAULT_SETTINGS = { server: isLocalPage ? "local" : "global", serverId: "global", sens: 5, fov: 80, distance: 900, speed: 8, render: "detailed" };
 // Ten quick-select slots: keys 1-9 then 0.
 const HOTBAR_SLOTS = 10;
 let settings = { ...DEFAULT_SETTINGS };
@@ -22,15 +22,14 @@ try {
   const raw = JSON.parse(localStorage.getItem("ac_settings") || "{}");
   if (raw && typeof raw === "object") settings = { ...settings, ...raw };
 } catch { /* defaults */ }
-// The API choice is not an ordinary setting: a page served from a machine's own
-// address (localhost, 127.x, a LAN address) talks to that machine's dev Worker
-// unless the player picked the published Worker by name in Settings. Opening
+// The API choice is not a setting any more: a page served from a machine's own
+// address (localhost, 127.x, a LAN address) talks to that machine's dev Worker;
+// any other page can only reach the published Worker. Opening
 // http://127.0.0.1:8000 and signing into a dev account is then enough — there is
 // no hidden switch to find first.
-if (isLocalPage && !localStorage.getItem("ac_server_choice")) settings.server = "local";
-if (!["global", "local"].includes(settings.server)) settings.server = isLocalPage ? "local" : "global";
+settings.server = isLocalPage ? "local" : "global";
 if (typeof settings.serverId !== "string" || !settings.serverId) settings.serverId = "global";
-if (!["flat", "detailed"].includes(settings.render)) settings.render = "flat";
+if (!["flat", "detailed"].includes(settings.render)) settings.render = "detailed";
 delete settings.mode; delete settings.flySpeed; // legacy keys from older builds
 function saveSettings() { localStorage.setItem("ac_settings", JSON.stringify(settings)); }
 // A private server belongs to the device that created it. The token is random
@@ -42,7 +41,6 @@ if (!/^[0-9a-f]{32,}$/.test(String(settings.device || ""))) {
   settings.device = [...bytes].map(b => b.toString(16).padStart(2, "0")).join("");
   saveSettings();
 }
-if (!isLocalPage) settings.server = "global"; // https page → http dev API is mixed content
 // `ac_api_port` lets the offline proof harness run the local worker on a
 // spare port when the dev API already owns 8787; it only ever applies on a
 // localhost page (same gate as the local server choice itself).
@@ -279,12 +277,6 @@ function updateAccountChip(){
     : "not signed in";
   $("pause-account-chip").textContent = label;
   $("mm-account-chip").textContent = label;
-  // The landing page offers the two entry points directly: the auth dialog is
-  // a form, not a page, so a player who has not played yet should not have to
-  // discover it behind a Join click.
-  $("mm-login").hidden = authenticated;
-  $("mm-register").hidden = authenticated;
-  $("pause-account").textContent = authenticated && username ? "Account" : "Log in / Register";
 }
 // The admin account is literally named "admin" — that exact username is the
 // whole role. Inventory surgery (test items, −1, clear) is admin-only and the
@@ -496,10 +488,12 @@ function formatDate(value){
 }
 
 $("pause-account").addEventListener("click",openAccountDialog);
-// The auth form opens over the landing rather than replacing it: closing the
-// landing would leave nowhere to press Join after signing in.
-$("mm-login").addEventListener("click",()=>openAuth("login"));
-$("mm-register").addEventListener("click",()=>openAuth("register"));
+// One Account button on the landing, exactly like the pause menu's: signed out
+// it opens the auth form, signed in it opens the account dialog
+// (openAccountDialog branches on `authenticated`). The auth form opens over
+// the landing rather than replacing it: closing the landing would leave
+// nowhere to press Join after signing in.
+$("mm-account").addEventListener("click",openAccountDialog);
 $("logout-button").addEventListener("click",async()=>{
   const button=$("logout-button");button.disabled=true;
   try{
@@ -1182,10 +1176,6 @@ $("my-recipes-list").addEventListener("click",async e=>{
 
 // ---- Settings dialog -----------------------------------------------------------
 function syncSettingsInputs(){
-  const sel=$("set-server");
-  sel.innerHTML='<option value="global">Global — all-contrib.all-contrib.workers.dev</option>';
-  if(isLocalPage)sel.innerHTML+='<option value="local">Local dev — http://127.0.0.1:8787</option>';
-  sel.value=settings.server;
   $("set-sensitivity").value=settings.sens;$("set-sensitivity-out").textContent=settings.sens;
   $("set-fov").value=settings.fov;$("set-fov-out").textContent=settings.fov+"°";
   $("set-distance").value=settings.distance;$("set-distance-out").textContent=settings.distance;
@@ -1264,8 +1254,7 @@ $("set-render").addEventListener("change",()=>{
     if(dveView)dveView.setSettings(viewSettings());
   });
 });
-$("set-server").addEventListener("change",()=>{settings.server=$("set-server").value;localStorage.setItem("ac_server_choice",settings.server);settings.serverId="global";saveSettings();location.reload();}); // fresh API_BASE, WS, session
-$("settings-reset").addEventListener("click",()=>{settings={...DEFAULT_SETTINGS};localStorage.removeItem("ac_server_choice");if(isLocalPage)settings.server="local";saveSettings();syncSettingsInputs();if(dveView)dveView.setSettings(viewSettings());});
+$("settings-reset").addEventListener("click",()=>{settings={...DEFAULT_SETTINGS};saveSettings();syncSettingsInputs();if(dveView)dveView.setSettings(viewSettings());});
 
 function openInventoryDialog(){
   refreshInventory();

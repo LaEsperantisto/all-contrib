@@ -60,10 +60,7 @@
         <button id="mm-server-create" class="button button-outline" type="button">Create server</button>
         <button id="mm-server-delete" class="button button-quiet" type="button" hidden>Delete</button>
       </span>
-      <span class="button-row">
-        <button id="mm-login" class="button button-outline" type="button">Log in</button>
-        <button id="mm-register" class="button button-outline" type="button">Create account</button>
-      </span>
+      <button id="mm-account" class="button button-outline full" type="button">Account</button>
       <button id="mm-instructions" class="button button-outline full" type="button">Instructions</button>
       <button id="mm-settings" class="button button-outline full" type="button">Settings</button>
     </div>
@@ -161,9 +158,8 @@
     <form method="dialog" class="modal-close"><button aria-label="Close">×</button></form>
     <div class="modal-mark">A</div><span class="eyebrow">GAME SETTINGS</span><h2>Settings</h2>
     <div class="settings-grid">
-      <label>Server<select id="set-server"><option value="global">Global — all-contrib.all-contrib.workers.dev</option></select></label>
-      <label>Mouse sensitivity<input id="set-sensitivity" type="range" min="1" max="10" step="1" value="5"><output id="set-sensitivity-out">5</output></label>
-      <label>Field of view<input id="set-fov" type="range" min="60" max="360" step="1" value="80"><output id="set-fov-out">80°</output></label>
+      <label>Mouse sensitivity<input id="set-sensitivity" type="range" min="1" max="30" step="1" value="5"><output id="set-sensitivity-out">5</output></label>
+      <label>Field of view<input id="set-fov" type="range" min="60" max="120" step="1" value="80"><output id="set-fov-out">80°</output></label>
       <label>Render distance<input id="set-distance" type="range" min="120" max="2000" step="20" value="900"><output id="set-distance-out">900</output></label>
       <label>Movement speed<input id="set-speed" type="range" min="3" max="20" step="1" value="8"><output id="set-speed-out">8</output></label>
       <label>Look<select id="set-render"><option value="flat">Flat colours</option><option value="detailed">Textures, models &amp; icons</option></select></label>
@@ -347,7 +343,7 @@
   // document.write at the old tag's spot preserves load order.
   document.write('<script src="' + (/^(localhost|127\.|\[?::1\]?$)/.test(location.hostname)
     ? "./app.js"
-    : "https://cdn.jsdelivr.net/gh/LaEsperantisto/all-contrib@main/app.js?v=31") + '"><\/script>');
+    : "https://cdn.jsdelivr.net/gh/LaEsperantisto/all-contrib@main/app.js?v=32") + '"><\/script>');
   </script>
 </body>
 </html>
