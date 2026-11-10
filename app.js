@@ -989,6 +989,7 @@ $("block-form").addEventListener("submit",async e=>{
   }
   catch(err){toast(err.message,true);}
 });
+$("block-climb").addEventListener("change",()=>{if($("block-climb").checked)$("block-pass").checked=true;});
 function enterEditMode(block){
   editingBlockId=block.id;
   pendingDelete.clear();
@@ -1422,7 +1423,7 @@ grabBtn.addEventListener("click",()=>{if(dveView)dveView.grabPointer();});
 // fetches the initial edits from the API itself; this map exists so the walk
 // camera and live WS echo see the same state.
 const worldEdits=new Map();
-let headSeq=0,ws=null,wsRetry=0,hadSocket=false,dveView=null,dveMod=null;
+let headSeq=0,ws=null,wsRetry=0,hadSocket=false,dveView=null,dveMod=null,joinedServerId=null;
 let worldBeams=[];
 let lastBeamStamp="";
 let wsBeamSeq=0; // counts ws-delivered beam frames; catches in-flight poll races
@@ -1787,6 +1788,7 @@ const guestSeed = "guest-" + Math.random().toString(36).slice(2, 10);
 
 async function initGameView(){
   if(!window.WebGLRenderingContext)throw new Error("WebGL unavailable in this browser");
+  joinedServerId=settings.serverId;   // the world this engine instance was born for
   showJoinHelp();
   let spawn=null;
   try{
@@ -2002,8 +2004,19 @@ async function boot(){
     $("main-menu").close();
     $("game").hidden = false;
     if (dveView) {           // returning from the game to the menu and back
-      dveView.resize();
-      dveView.grabPointer();
+      if (settings.serverId === joinedServerId) {
+        dveView.resize();
+        dveView.grabPointer();
+        return;
+      }
+      // A different world: the running engine — its generator worker (born
+      // with the old world id in its URL hash), its edit mirror, its socket
+      // world and its Babylon scene — belongs to the world we left. Joining
+      // on top of it just stacked the two worlds' edits on one screen. The
+      // honest reset is a fresh page; ac_autojoin presses Join again once
+      // the new page has restored the session.
+      sessionStorage.setItem("ac_autojoin", "1");
+      location.reload();
       return;
     }
     try {
@@ -2046,5 +2059,11 @@ async function boot(){
   });
   $("mm-settings").addEventListener("click", () => { syncSettingsInputs(); $("settings-dialog").showModal(); });
   $("main-menu").showModal();
+  // Join after a world-switch reload (see the Join handler): the flag is set
+  // only by that switch, so this never auto-boots the game for a cold visit.
+  if (sessionStorage.getItem("ac_autojoin") === "1") {
+    sessionStorage.removeItem("ac_autojoin");
+    void restoreSession().then(() => { if (authenticated) $("mm-join").click(); });
+  }
 }
 boot();
