@@ -12,10 +12,10 @@ import { VoxelBuildSpace } from "@divinevoxel/vlox/Builder/VoxelBuildSpace";
 import { PaintVoxelData } from "@divinevoxel/vlox/Voxels";
 import { VoxelLUT } from "@divinevoxel/vlox/Voxels/Data/VoxelLUT";
 import { GeometryLUT } from "@divinevoxel/vlox/Voxels/Data/GeometryLUT";
-import { SLAB, SEA_LEVEL, voxelIdFor, baseBlock, heightAt, windowOriginFor, shiftWindow, WINDOW } from "./world.js";
+import { SLAB, SEA_LEVEL, voxelIdFor, baseBlock, heightAt, biomeAt, structureKind, windowOriginFor, shiftWindow, WINDOW } from "./world.js";
 // Re-exported so app.js can resolve live cells (walk surface, blockAt) with
 // the same terrain mirror the generator uses.
-export { SLAB, SEA_LEVEL, baseBlock, heightAt };
+export { SLAB, SEA_LEVEL, baseBlock, heightAt, biomeAt, structureKind };
 
 // Headless diagnostics: count mesher→renderer deliveries, capture cb throws
 // (a throwing cb silently never responds, pinning the sender's in-flight cap).
