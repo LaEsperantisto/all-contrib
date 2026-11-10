@@ -678,8 +678,12 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
       const col = Color3.FromHexString(parsed[key]);
       mat.diffuseColor = col;
       // Eyes carry a little more self-illumination so the facing cue survives
-      // the night, when diffuse shading is nearly black.
-      r.lit.push({ mat, glow: col.scale(key === "eye_colour" ? 0.6 : 0.3) });
+      // the night, when diffuse shading is nearly black. The scene has no
+      // lights at all — a diffuse-only material renders pure black — so the
+      // emissive baseline must be set here, not only through the flash path.
+      const glow = col.scale(key === "eye_colour" ? 0.6 : 0.3);
+      mat.emissiveColor = glow;
+      r.lit.push({ mat, glow });
     }
     r.flashWas = -1;                      // re-apply the current flash level
   };
@@ -1260,6 +1264,18 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     setSelfAppearance(appearance) {
       selfLook = appearance;
       applyLook(selfRecord(), appearance);
+    },
+    /**
+     * What the body you control is actually painted: for every coloured part,
+     * the live material's diffuse + emissive as hex. Proof reads the scene,
+     * not the config the dialog stored.
+     */
+    selfLookHexes() {
+      return selfRecord().parts.filter(p => p.key).map(p => ({
+        key: p.key,
+        diffuse: p.mat.diffuseColor.toHexString().toLowerCase(),
+        emissive: p.mat.emissiveColor.toHexString().toLowerCase(),
+      }));
     },
     /**
      * What the body you control holds: the selected item's icon (a data-URL
