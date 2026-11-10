@@ -895,6 +895,7 @@ function registerScriptApiProviders() {
   m.languages.registerCompletionItemProvider("lua", scriptApiProvider);
   m.languages.registerHoverProvider("lua", scriptHoverProvider);
   self.scriptApiProvider = scriptApiProvider; // s28studio fires provideCompletionItems directly
+self.scriptHoverProvider = scriptHoverProvider; // ... and provideHover
 }
 function renderScriptApiReference() {
   const rows = $("script-api-rows");
@@ -915,12 +916,13 @@ async function mountBlockEditor(){
     const base=location.origin+"/vendor/monaco/vs/";
     self.MonacoEnvironment={getWorkerUrl:()=> "data:text/javascript;charset=utf-8,"+encodeURIComponent("self.MonacoEnvironment={baseUrl:'"+base+"'};importScripts('"+base+"base/worker/workerMain.js');")};
     await new Promise((res,rej)=>{self.require.config({paths:{vs:base.replace(/\/$/,"")}});self.require(["vs/editor/editor.main"],res,()=>rej(new Error("amd load failed")));});
+    registerScriptApiProviders(); // completions + hover ride the SCRIPT_API table
     const host=$("block-script-editor");
     blockEditor=self.monaco.editor.create(host,{value:$("block-script").value,language:"lua",theme:"vs-dark",automaticLayout:true,minimap:{enabled:false},scrollBeyondLastLine:false,fixedOverflow:true,fontSize:12,lineHeight:1.55,renderLineHighlight:"none",contextmenu:false});
     $("block-script").hidden=true;host.hidden=false;
     blockEditor.onDidChangeModelContent(()=>{clearTimeout(scriptCheckTimer);scriptCheckTimer=setTimeout(checkScriptDraft,500);});
     checkScriptDraft();
-  }catch{blockEditor=null;/* keep the textarea; no in-game console noise */}
+  }catch{blockEditor=null;const n=$("block-editor-notice");if(n)n.hidden=false;/* textarea keeps working; say why */}
 }
 async function checkScriptDraft(){
   if(!blockEditor||!authenticated)return;
@@ -934,6 +936,11 @@ async function checkScriptDraft(){
       severity:self.monaco.MarkerSeverity.Error,message:(res&&res.error)||"Syntax error."}]);
   }catch{/* unreachable server: leave the last markers; submit still validates */}
 }
+// Opening Studio mounts the syntax editor eagerly: the old `focusin` trigger
+// meant the first click into the Script field showed the plain textarea,
+// then swapped under the cursor - the "simple text box" complaint.
+// (mountBlockEditor's own editorMountTried guard makes repeat opens free.)
+function openStudio(){mountBlockEditor();$("studio-dialog").showModal();}
 $("block-form").addEventListener("focusin",mountBlockEditor,{once:true});
 function resetBlockAppearance(){
   blockTextureField.set(null);
@@ -1284,7 +1291,7 @@ $("pause-mainmenu").addEventListener("click",()=>{
   syncGrabBtn();
 });
 $("pause-inventory").addEventListener("click",openInventoryDialog);
-$("pause-studio").addEventListener("click",()=>$("studio-dialog").showModal());
+$("pause-studio").addEventListener("click",openStudio);
 // The admin settings live in their own dialog, opened with + by the admin
 // account alone; the pause menu stays the same for everybody else. Opening it
 // re-reads the clock, so an admin whose socket once missed a push still sees the
@@ -1376,7 +1383,7 @@ $("character-save").addEventListener("click",async()=>{
 function openCharacterDialog(){renderCharacterPreview();$("character-dialog").showModal();}
 $("hud-character").addEventListener("click",openCharacterDialog);
 $("hud-inventory").addEventListener("click",openInventoryDialog);
-$("hud-studio").addEventListener("click",()=>$("studio-dialog").showModal());
+$("hud-studio").addEventListener("click",openStudio);
 // Third person (Backspace or this button) swings the camera behind your own
 // body. It is a camera only: where the body is, what the crosshair picks and
 // what the pose frames report all keep coming from the eye camera.
@@ -1959,7 +1966,7 @@ document.addEventListener("keydown",e=>{
   }
   if(e.key==="c"||e.key==="C"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();openCharacterDialog();return;}
   if(e.key==="i"||e.key==="I"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();openInventoryDialog();return;}
-  if(e.key==="b"||e.key==="B"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();$("studio-dialog").showModal();return;}
+  if(e.key==="b"||e.key==="B"){e.preventDefault();if(document.pointerLockElement)document.exitPointerLock();openStudio();return;}
   if(e.key==="f"||e.key==="F"){e.preventDefault();eatSelected();return;}
   if(e.key==="e"||e.key==="E"){e.preventDefault();interactUnderCrosshair();return;}
   // Backspace would otherwise walk the tab back through history.
