@@ -113,6 +113,7 @@ $("mm-server-list").addEventListener("change", () => {
   pendingServerDelete = null;
   saveSettings();
   liveReconnect();  // the pose socket is baked to a world at dial; it must follow the picker
+  refreshInventory();  // the bag is per-world: switching worlds switches it
   renderServerPicker();
 });
 $("mm-server-create").addEventListener("click", () => {
@@ -215,7 +216,7 @@ async function migrateLegacyInventory() {
   if (localStorage.getItem(flag)) return;
   const legacy = Object.entries(readLegacyInventory()).slice(0, 50);
   for (const [id, quantity] of legacy) {
-    await api("/api/inventory/add", { method: "POST", body: JSON.stringify({ item_id: id, quantity }) }).catch(() => null);
+    await api("/api/inventory/add", { method: "POST", body: JSON.stringify({ item_id: id, quantity, server: "global" }) }).catch(() => null);
   }
   localStorage.setItem(flag, "1");
   localStorage.removeItem(legacyInventoryKey());
@@ -230,7 +231,7 @@ async function refreshInventory() {
     return;
   }
   try {
-    const data = await api("/api/inventory");
+    const data = await api(`/api/inventory?server=${encodeURIComponent(settings.serverId)}`);
     inventory = {};
     for (const row of data.inventory) inventory[row.item_id] = row.quantity;
     if (selectedItem && !(selectedItem in inventory)) selectedItem = null;
@@ -560,7 +561,7 @@ $("add-item-form").addEventListener("submit",async e=>{
   if(!/^[a-z0-9_:-]{1,48}$/.test(id)){toast("Use 1–48 letters, numbers, underscores, colons or hyphens for the item ID.",true);return;}
   if(!Number.isSafeInteger(quantity)||quantity<1||quantity>999){toast("Quantity must be between 1 and 999.",true);return;}
   try{
-    await api("/api/inventory/add",{method:"POST",body:JSON.stringify({item_id:id,quantity})});
+    await api("/api/inventory/add",{method:"POST",body:JSON.stringify(srvBody({item_id:id,quantity}))});
     $("add-item-id").value="";$("add-item-quantity").value="16";
     await refreshInventory();
     toast(`Added ${quantity} × ${id} to your inventory.`);
@@ -569,7 +570,7 @@ $("add-item-form").addEventListener("submit",async e=>{
 $("inventory-list").addEventListener("click",async e=>{
   const remove=e.target.closest("[data-remove-item]");
   if(remove){
-    try{await api("/api/inventory/remove",{method:"POST",body:JSON.stringify({item_id:remove.dataset.removeItem,quantity:1})});await refreshInventory();}
+    try{await api("/api/inventory/remove",{method:"POST",body:JSON.stringify(srvBody({item_id:remove.dataset.removeItem,quantity:1}))});await refreshInventory();}
     catch(err){toast(err.message,true);}
     return;
   }
@@ -579,7 +580,7 @@ $("inventory-list").addEventListener("click",async e=>{
 });
 $("clear-inventory-button").addEventListener("click",async()=>{
   if(!authenticated){openAuth("login");return;}
-  try{await api("/api/inventory/clear",{method:"POST",body:"{}"});await refreshInventory();toast("Inventory cleared.");}
+  try{await api("/api/inventory/clear",{method:"POST",body:JSON.stringify(srvBody())});await refreshInventory();toast("Inventory cleared.");}
   catch(err){toast(err.message,true);}
 });
 function blockById(id){return currentBlocks.find(block=>block.id===id);}
@@ -699,7 +700,7 @@ async function swapStacks(a,b){
   for(const key of ids)next[key]=inventory[key];
   inventory=next;
   renderInventory();renderCrafting();
-  try{await api("/api/inventory/order",{method:"POST",body:JSON.stringify({ids})});}
+  try{await api("/api/inventory/order",{method:"POST",body:JSON.stringify(srvBody({ids}))});}
   catch(error){toast(error.message,true);refreshInventory();}
 }
 for(const root of [$("inventory-list"),$("hotbar")]){
@@ -762,7 +763,7 @@ $("crafting-list").addEventListener("click",async e=>{
   const button=e.target.closest("[data-craft-id]");if(!button||button.disabled)return;
   if(!authenticated){openAuth("login");return;}
   try{
-    const data=await api("/api/recipes/craft",{method:"POST",body:JSON.stringify({recipe_id:button.dataset.craftId})});
+    const data=await api("/api/recipes/craft",{method:"POST",body:JSON.stringify(srvBody({recipe_id:button.dataset.craftId}))});
     await refreshInventory();
     toast(`Crafted ${data.quantity} × ${data.id}.`);
   }catch(err){toast(err.message,true);renderCrafting();}
@@ -828,6 +829,85 @@ let editorMountTried=false;
 let scriptCheckTimer=0;
 function scriptValue(){return blockEditor?blockEditor.getValue():$("block-script").value;}
 function setScriptValue(v){if(blockEditor)blockEditor.setValue(v||"");else $("block-script").value=v||"";}
+// The script surface, one entry per host function the Worker actually answers
+// (mirrors setHost() in backend/src/lua.ts; s28studio diffs the two). Fed to
+// Monaco completions + hover and to the visible table under the editor.
+const SCRIPT_API = Object.freeze([
+  { sig: "player", kind: "var", desc: "Name of the player who triggered the script." },
+  { sig: "key", kind: "var", desc: "Menu option key from on_choice; nil elsewhere." },
+  { sig: "x, y, z", kind: "var", desc: "Coordinates of the block the script runs on." },
+  { sig: "on_interact(player)", kind: "hook", desc: "Runs when a player presses E on this block." },
+  { sig: "on_choice(key, player)", kind: "hook", desc: "Runs when the player picks a menu option." },
+  { sig: "on_break(player)", kind: "hook", desc: "Runs when a player breaks this block." },
+  { sig: "state_get(key)", desc: "Read a saved variable (nil when never set)." },
+  { sig: "state_set(key, value)", desc: "Save nil, a string, a number or a boolean for this block." },
+  { sig: "menu(title, options)", desc: "Show the player up to 12 buttons; the pick arrives in on_choice(key, player)." },
+  { sig: "beam(colour)", desc: "Flash a beam of that colour from the block (#rrggbb or a name)." },
+  { sig: "toast(message)", desc: "Show a small message on the player's screen." },
+  { sig: "log(message)", desc: "Write a line to this block's script log (admin-visible)." },
+  { sig: "get_player_position()", desc: "Returns {x, y, z} where the player stands." },
+  { sig: "set_player_position(x, y, z)", desc: "Move the player to that spot." },
+  { sig: "set_player_respawn_position(x, y, z)", desc: "Set where the player respawns." },
+  { sig: "give_item(id, qty)", desc: "Add an item to the player's inventory; returns the new stack count." },
+  { sig: "take_item(id, qty)", desc: "Remove items from the player's inventory; returns how many were taken." },
+  { sig: "item_count(id)", desc: "How many of that item the player carries." },
+  { sig: "inv_add(id, qty)", desc: "Add an item to this block's own stored inventory; returns the new count." },
+  { sig: "inv_take(id, qty)", desc: "Remove from this block's stored inventory; returns how many were taken." },
+  { sig: "inv_count(id)", desc: "How many of that item the block stores." },
+  { sig: "inv_list()", desc: "Table of item id -> quantity for this block's stored inventory." },
+  { sig: "tonumber(value[, base])", desc: "Number of a value, or nil." },
+  { sig: "tostring(value)", desc: "Readable text form of a value." },
+  { sig: "type(value)", desc: "\"nil\", \"boolean\", \"number\" or \"string\"." },
+  { sig: "pairs(table)", desc: "Iterate every key of a table." },
+  { sig: "ipairs(table)", desc: "Iterate a table in 1..n order." },
+  { sig: "math.floor / ceil / abs / sqrt / min / max / random / randomseed", desc: "The maths subset the sandbox allows." },
+  { sig: "string.len / upper / lower / sub / rep / find / format", desc: "The string subset the sandbox allows (no match/gsub/gmatch)." },
+  { sig: "table.insert / remove / concat", desc: "The table subset the sandbox allows (no sort)." },
+]);
+self.SCRIPT_API = SCRIPT_API;
+let scriptApiProvider = null;
+let scriptHoverProvider = null;
+function apiName(e) { return e.sig.split(/[ (\/]/)[0]; }
+function registerScriptApiProviders() {
+  const m = self.monaco;
+  scriptApiProvider = {
+    provideCompletionItems(model, position) {
+      const word = model.getWordAtPosition(position);
+      const range = { startLineNumber: position.lineNumber, endLineNumber: position.lineNumber,
+        startColumn: (word && word.startColumn) || position.column, endColumn: (word && word.endColumn) || position.column };
+      const items = SCRIPT_API.map(e => ({
+        label: apiName(e), kind: e.kind === "var" ? m.languages.CompletionItemKind.Variable
+          : e.kind === "hook" ? m.languages.CompletionItemKind.Event : m.languages.CompletionItemKind.Function,
+        insertText: apiName(e), detail: e.sig, documentation: e.desc, range }));
+      return { suggestions: items };
+    },
+  };
+  scriptHoverProvider = {
+    provideHover(model, position) {
+      const word = model.getWordAtPosition(position);
+      if (!word) return null;
+      const e = SCRIPT_API.find(a => apiName(a) === word.word);
+      if (!e) return null;
+      return { range: { startLineNumber: position.lineNumber, endLineNumber: position.lineNumber, startColumn: word.startColumn, endColumn: word.endColumn },
+        contents: [{ value: "`" + e.sig + "` — " + e.desc }] };
+    },
+  };
+  m.languages.registerCompletionItemProvider("lua", scriptApiProvider);
+  m.languages.registerHoverProvider("lua", scriptHoverProvider);
+  self.scriptApiProvider = scriptApiProvider; // s28studio fires provideCompletionItems directly
+}
+function renderScriptApiReference() {
+  const rows = $("script-api-rows");
+  if (!rows) return;
+  rows.innerHTML = "";
+  for (const e of SCRIPT_API) {
+    const tr = document.createElement("tr");
+    const c1 = document.createElement("td"); c1.textContent = e.sig; c1.className = "api-sig";
+    const c2 = document.createElement("td"); c2.textContent = e.desc;
+    tr.append(c1, c2); rows.append(tr);
+  }
+}
+renderScriptApiReference();
 async function mountBlockEditor(){
   if(editorMountTried)return;editorMountTried=true;
   try{
@@ -883,8 +963,9 @@ let editingBlockId=null;
 const pendingDelete=new Set();
 $("block-form").addEventListener("submit",async e=>{
   e.preventDefault();if(!authenticated){openAuth("login");toast("Log in to publish a block.");return;}
-  const rules={support:$("block-support").value,incompatibleWith:$("block-incompatible").value.split(",").map(x=>x.trim().toLowerCase()).filter(Boolean)};
-  const common={name:$("block-name").value,hardness:Number($("block-hardness").value),light:Number($("block-light").value),colour:$("block-colour").value,behaviour:$("block-behaviour").value,pass_through:$("block-pass").checked,rules,
+  const splitIds=v=>v.split(",").map(x=>x.trim().toLowerCase()).filter(Boolean);
+  const rules={below:$("block-below").value,belowIds:splitIds($("block-below-ids").value),incompatibleWith:splitIds($("block-incompatible").value)};
+  const common={name:$("block-name").value,hardness:Number($("block-hardness").value),light:Number($("block-light").value),colour:$("block-colour").value,behaviour:$("block-behaviour").value,pass_through:$("block-pass").checked,climbable:$("block-climb").checked,rules,
     texture:blockTextureField.value(),texture_top:blockTextureTopField.value(),texture_bottom:blockTextureBottomField.value(),model:$("block-model").value||null,script:scriptValue().trim()||null,
     drop_item_id:$("block-drop-item").value||null,drop_qty:Number($("block-drop-qty").value)||1};
   try{
@@ -895,7 +976,7 @@ $("block-form").addEventListener("submit",async e=>{
     }else{
       await api("/api/blocks",{method:"POST",body:JSON.stringify({...common,namespace:$("block-namespace").value,id:$("block-id").value})});
       toast("Block published to the registry. It becomes placeable immediately; textures reload on next visit.");
-      e.target.reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";$("block-pass").checked=false;resetBlockAppearance();updateIdPreview();$("block-drop-item").value="";$("block-drop-qty").value=1;
+      e.target.reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";$("block-pass").checked=false;$("block-climb").checked=false;resetBlockAppearance();updateIdPreview();$("block-drop-item").value="";$("block-drop-qty").value=1;
     }
     await refreshRegistry();
   }
@@ -909,8 +990,9 @@ function enterEditMode(block){
   const localId=block.id.startsWith("player:")?parts.slice(3).join(":"):block.id;
   const rules=block.rules&&typeof block.rules==="object"?block.rules:{};
   $("block-name").value=block.name;$("block-namespace").value=namespace;$("block-id").value=localId;
-  $("block-hardness").value=block.hardness;$("block-light").value=block.light;$("block-colour").value=block.colour;$("block-pass").checked=!!block.pass_through;
-  $("block-behaviour").value=block.behaviour;$("block-support").value=rules.support||"solid";
+  $("block-hardness").value=block.hardness;$("block-light").value=block.light;$("block-colour").value=block.colour;$("block-pass").checked=!!block.pass_through;$("block-climb").checked=!!block.climbable;
+  $("block-behaviour").value=block.behaviour;$("block-below").value=rules.below||"any";
+  $("block-below-ids").value=(rules.belowIds||[]).join(", ");
   $("block-incompatible").value=(rules.incompatibleWith||[]).join(", ");
   blockTextureField.set(block.texture||null);
   blockTextureTopField.set(block.texture_top||null);
@@ -929,7 +1011,7 @@ function exitEditMode(){
   $("block-edit-note").hidden=true;
   $("block-form-title").textContent="Block workshop";$("block-form-sub").textContent="Design a new block";
   $("block-submit").innerHTML='Publish block <span>＋</span>';
-  $("block-form").reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";$("block-pass").checked=false;resetBlockAppearance();updateIdPreview();
+  $("block-form").reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";$("block-pass").checked=false;$("block-climb").checked=false;resetBlockAppearance();updateIdPreview();
 }
 // Live registry-ID preview: player:USERNAME:NAMESPACE:BLOCKNAME.
 function updateIdPreview(){
@@ -1616,6 +1698,11 @@ async function eatSelected(){
 // cheap stamp endpoint — only when the stamp moved does the (≤400 row) beam
 // list get re-diffed against what the engine is actually drawing.
 setInterval(()=>{if(!ws||ws.readyState>1)loadWorldAll();else void beamCatchup();},4000);
+// The engine's moving window: when the 256-cell slab steps to a new origin,
+// this fetch must cover the new window too — edits there predate this
+// session and never arrive over the socket. The snapshot query is
+// window-scoped, so one loadWorldAll pulls exactly what shifted in.
+window.addEventListener("ac-window-shift", () => { if(dveMod) void loadWorldAll(); });
 async function beamCatchup(){
   const seq=wsBeamSeq;
   let data=null;
@@ -1666,7 +1753,7 @@ async function worldAction(button,x,y,z){
 // One source for the control brief: the join overlay and the Instructions menu
 // (main menu + pause menu) both render this exact string.
 const JOIN_HELP_MS = 10_000;
-const KEYS_HELP = 'In game: <b>WASD</b> move · <b>Shift</b> sprint · mouse look · <b>Space</b> jump · <b>1–9,0</b> hotbar · left-click break/attack · right-click place · <b>E</b> use block · <b>F</b> eat · <b>C</b> character · <b>I</b> inventory · <b>B</b> studio · <b>+</b> admin settings · <b>Backspace</b> third person · <b>Esc</b> menu';
+const KEYS_HELP = 'In game: <b>WASD</b> move · <b>Arrow keys</b> look · <b>Shift</b> sprint · mouse look · <b>Space</b> jump · <b>1–9,0</b> hotbar · hold <b>left-click</b> to mine · click a mob to attack · <b>right-click</b> place · <b>E</b> use block · <b>F</b> eat · <b>C</b> character · <b>I</b> inventory · <b>B</b> studio · <b>+</b> admin settings · <b>Backspace</b> third person · <b>Esc</b> menu';
 $("join-help").innerHTML = KEYS_HELP;
 $("instructions-body").innerHTML = KEYS_HELP;
 let joinHelpTimer = null;
@@ -1760,32 +1847,90 @@ function failGame(err){
 // Click = action (break/place at the crosshair), press-and-move = look (the
 // DVE module handles look via pointer lock or drag; a click without movement
 // is the trigger here).
-let downAt=null,downButton=0;
+// Left = hold to mine. The bar under the crosshair fills over
+// 0.25 + hardness/speed seconds (speed = the selected item's speed, floor 1);
+// completing the bar POSTs the break, releasing early just cancels it.
+// Bedrock-grade hardness (500+) sits at 99.9% forever — it is unbreakable —
+// and the server refuses any break under 200 ms, so the bar is the authority,
+// not decoration. Right = click to place, unchanged.
+let downAt=null,downButton=0,mining=null;
+const MINE_RECHECK=150;
 const gameCanvas=$("game-canvas");
 gameCanvas.addEventListener("contextmenu",e=>e.preventDefault());
-gameCanvas.addEventListener("pointerdown",e=>{downAt={x:e.clientX,y:e.clientY,t:Date.now()};downButton=e.button;});
+gameCanvas.addEventListener("pointerdown",async e=>{
+  downAt={x:e.clientX,y:e.clientY,t:Date.now()};downButton=e.button;
+  if(e.button!==0||dead||!dveView)return;
+  // A body under the crosshair takes the hit, not the pickaxe.
+  if(attackUnderCrosshair()){downAt=null;return;}
+  let hit=null;
+  try{hit=await dveView.pickCenter();}catch{/* pick failed: nothing to dig */return;}
+  if(!hit||!hit.position)return;
+  const x=hit.position.x|0,y=hit.position.y|0,z=hit.position.z|0;
+  const S=dveMod.SLAB;
+  if(x<S.X0||x>=S.X1||y<S.Y0||y>=S.Y1||z<S.Z0||z>=S.Z1)return;
+  const id=cellBlock(x,y,z);
+  if(!id||id==="air")return;
+  mining={x,y,z,t0:performance.now(),nextCheck:performance.now()+MINE_RECHECK,
+    hardness:Number(blockById(id)?.hardness)||2,done:false};
+  $("mine-bar").hidden=false;
+  requestAnimationFrame(miningTick);
+});
+gameCanvas.addEventListener("pointermove",e=>{
+  // Dragging to look (unlocked pointer) abandons the dig.
+  if(mining&&downAt&&Math.abs(e.clientX-downAt.x)+Math.abs(e.clientY-downAt.y)>=8)stopMining();
+});
 gameCanvas.addEventListener("pointerup",async e=>{
   if(!downAt||e.button!==downButton){downAt=null;return;}
   const moved=Math.abs(e.clientX-downAt.x)+Math.abs(e.clientY-downAt.y);
   const quick=Date.now()-downAt.t<600;
   downAt=null;
+  if(e.button===0){stopMining();return;} // release early: the bar dies, nothing POSTs
   if(!dveView||moved>=8||!quick||e.button>2)return;
-  // In-game axis: left = break, right = place.
-  await gameAction(e.button===0?2:0);
+  await placeAction();
 });
-async function gameAction(button){
+function stopMining(){
+  mining=null;
+  const bar=$("mine-bar");
+  bar.hidden=true;bar.firstElementChild.style.width="0";
+}
+function miningTick(){
+  if(!mining||mining.done)return;
+  const fill=$("mine-bar").firstElementChild;
+  const now=performance.now();
+  // The target must stay under the crosshair: re-pick on a throttle and let
+  // the answer cancel the dig if the aim (or the block) moved out from under.
+  if(now>=mining.nextCheck){
+    mining.nextCheck=now+MINE_RECHECK;
+    const m=mining;
+    dveView.pickCenter().then(hit=>{
+      if(mining!==m)return;
+      if(!hit||!hit.position||(hit.position.x|0)!==m.x||(hit.position.y|0)!==m.y||(hit.position.z|0)!==m.z)stopMining();
+    }).catch(()=>{if(mining===m)stopMining();});
+  }
+  if(mining.hardness>=500){fill.style.width="99.9%";}
+  else{
+    const speed=Math.max(1,Number(itemMeta(selectedItem)?.speed)||1);
+    const p=(now-mining.t0)/(250+mining.hardness/speed*1000);
+    if(p>=1){
+      const m=mining;m.done=true;stopMining();
+      void worldAction(2,m.x,m.y,m.z);
+      return;
+    }
+    fill.style.width=`${(p*100).toFixed(1)}%`;
+  }
+  requestAnimationFrame(miningTick);
+}
+async function placeAction(){
   if(dead){toast("You are dead — respawn first.",true);return;}
-  // Left-click aimed at a body (mob or player): attack, don't dig.
-  if(button===2&&attackUnderCrosshair())return;
   let hit=null;
   try{hit=await dveView.pickCenter();}catch{/* pick failed: treat as nothing in reach */}
   if(!hit||!hit.position){toast("Nothing in reach — aim the crosshair at a block.",true);return;}
-  const cell=button===0?hit.normalPosition:hit.position; // place: the adjacent face; break: the hit block
+  const cell=hit.normalPosition; // place onto the adjacent face
   const x=cell.x|0,y=cell.y|0,z=cell.z|0;
   const S=dveMod.SLAB;
   if(x<S.X0||x>=S.X1||y<S.Y0||y>=S.Y1||z<S.Z0||z>=S.Z1){toast("That is outside the world.",true);return;}
-  if(button===0&&dveView.bodyCellOverlap(x,y,z)){toast("That block would be inside you.",true);return;}
-  await worldAction(button,x,y,z);
+  if(dveView.bodyCellOverlap(x,y,z)){toast("That block would be inside you.",true);return;}
+  await worldAction(0,x,y,z);
 }
 
 // HUD: pose readout.

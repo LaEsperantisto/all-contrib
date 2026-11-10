@@ -12,7 +12,7 @@ import { VoxelBuildSpace } from "@divinevoxel/vlox/Builder/VoxelBuildSpace";
 import { PaintVoxelData } from "@divinevoxel/vlox/Voxels";
 import { VoxelLUT } from "@divinevoxel/vlox/Voxels/Data/VoxelLUT";
 import { GeometryLUT } from "@divinevoxel/vlox/Voxels/Data/GeometryLUT";
-import { SLAB, SEA_LEVEL, voxelIdFor, baseBlock, heightAt } from "./world.js";
+import { SLAB, SEA_LEVEL, voxelIdFor, baseBlock, heightAt, windowOriginFor, shiftWindow, WINDOW } from "./world.js";
 // Re-exported so app.js can resolve live cells (walk surface, blockAt) with
 // the same terrain mirror the generator uses.
 export { SLAB, SEA_LEVEL, baseBlock, heightAt };
@@ -239,6 +239,23 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
         if (solidVoxel(bx, y, bz)) return true;
     return false;
   };
+  // Does ANY part of the body AABB touch a climbable cell? Feet, waist or
+  // head all count — the same box math bodyBlocked uses, swapped from
+  // solidVoxel to the registry's climbable set. Climbables are pass_through,
+  // so the body may already be standing inside one.
+  const climbContact = () => {
+    const x = camera.position.x, z = camera.position.z, feetY = camera.position.y - EYE;
+    const x0 = Math.floor(x - HALF), x1 = Math.floor(x + HALF);
+    const z0 = Math.floor(z - HALF), z1 = Math.floor(z + HALF);
+    const y0 = Math.floor(feetY + 0.002), y1 = Math.floor(feetY + HEIGHT - 0.002);
+    for (let bx = x0; bx <= x1; bx++)
+      for (let bz = z0; bz <= z1; bz++)
+        for (let by = y0; by <= y1; by++) {
+          const id = cellAt(bx, by, bz);
+          if (id !== undefined && climbSet.has(id)) return true;
+        }
+    return false;
+  };
 
   const tick = () => {
     const dt = Math.min(0.1, engine.getDeltaTime() / 1000);
@@ -263,14 +280,6 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     let dx = 0, dz = 0;
     if (mz) { dx += Math.sin(yaw) * mz * speed * dt; dz += Math.cos(yaw) * mz * speed * dt; }
     if (mx) { dx += Math.cos(yaw) * mx * speed * dt; dz += -Math.sin(yaw) * mx * speed * dt; }
-
-    // Swimming: the cell at the body's middle (waist-ish) decides buoyancy.
-    // In water horizontal drive is damped, gravity is quartered with a slow
-    // sink cap, and Space is a short upward stroke. No drowning: the sea is
-    // still water over a sandy floor that is always within a slow sink.
-    const bodyCell = cellAt(Math.floor(camera.position.x), Math.floor(camera.position.y - 0.5), Math.floor(camera.position.z));
-    const inWater = bodyCell === "builtin:water";
-    if (inWater) { dx *= 0.6; dz *= 0.6; }
 
     // Axis-wise AABB resolution against the voxel grid: slide along walls,
     // snap flush to the face we hit.
@@ -297,8 +306,19 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
       if (f < SLAB.Y1) { camera.position.y = f + EYE + 0.001; vy = 0; }
     }
 
-    if (keys.has("Space") && (grounded || inWater)) { vy = inWater ? 3.2 : JUMP_V; grounded = false; }
-    vy = Math.max(inWater ? -2 : -MAX_FALL, vy - (inWater ? GRAVITY * 0.25 : GRAVITY) * dt);
+    // Climbing: while ANY part of the body touches a climbable cell (ladders),
+    // gravity is skipped: W climbs at 2.2 m/s, letting go slides at 2.4 m/s.
+    // Space still jumps normally; deep water has no stroke any more — you
+    // fall through it with full gravity, by design.
+    const climb = climbContact();
+    if (climb && !keys.has("Space")) {
+      vy = keys.has("KeyW") ? 2.2 : Math.max(-2.4, vy - 4 * dt);
+      grounded = false;
+    } else if (keys.has("Space") && (grounded || climb)) {
+      vy = JUMP_V; grounded = false;
+    } else {
+      vy = Math.max(-MAX_FALL, vy - GRAVITY * dt);
+    }
     let ny = camera.position.y + vy * dt;
     if (bodyBlocked(camera.position.x, ny - EYE, camera.position.z)) {
       if (vy <= 0) {
@@ -339,6 +359,7 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
   // draws, `pass_through` says bodies ignore it. Crops are both transparent
   // AND pass-through; glass is only transparent.
   const passThru = new Set();
+  const climbSet = new Set(); // climbable registry ids (raw block-ID space, like passThru)
   const emits = new Map(); // voxel id -> light level from the registry
   // Every block id this view can actually paint: the vlox palette only knows
   // what this feed defined, and an edit for anything else throws deep in the
@@ -402,6 +423,7 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     // Physics reads the live cell mirror, which speaks raw block IDs ("builtin:wheat_1"),
     // not palette voxel IDs — the pass-through set must use the same space.
     if (b.pass_through) passThru.add(b.id);
+    if (b.climbable) climbSet.add(b.id);
   }
 
   // ---- Glow layer ------------------------------------------------------------
@@ -1004,6 +1026,18 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     if (cell !== genCell) {
       genCell = cell;
       DVER.threads.world.runTask("move-generator", [camera.position.x, camera.position.y, camera.position.z]);
+      // The moving window: the slab follows the player in the same 16-cell
+      // steps, so there is no wall to walk into — only the ±1,000,000 REST
+      // bound far beyond any practical walk (and the clamp below, now a
+      // safety net a window ahead of the player can never trigger).
+      const [wox, woz] = windowOriginFor(camera.position.x, camera.position.z);
+      if (shiftWindow(wox, woz)) {
+        try {
+          const gen = DVER.threads.generators.getThreads()[0];
+          if (gen) gen.runTaskAsync("shift-window", [wox, woz]);
+        } catch { /* a generator restart refetches for the current window anyway */ }
+        window.dispatchEvent(new Event("ac-window-shift"));
+      }
     }
     scene.render();
   };
@@ -1013,6 +1047,8 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
   // Diagnostics/testing handle (pixel reads, mesh counts, camera in checks).
   // `frame` lets a harness drive physics without depending on rAF scheduling.
   window.__dve = { engine, scene, camera, DVER, buildSpace, counts: __dveCounts, errors: __dveErrors, genCell: () => genCell, frame,
+    // The moving window, live: a harness asserts the slab followed the player.
+    slab: () => ({ x0: SLAB.X0, x1: SLAB.X1, z0: SLAB.Z0, z1: SLAB.Z1, ox: WINDOW.ox, oz: WINDOW.oz }),
     aim: (y, p) => { yaw = y; pitch = clamp(p, -1.52, 1.52); camera.rotation.y = yaw; camera.rotation.x = pitch; },
     // What the compiled geometry record for a voxel says each face wears.
     dbgVoxel: (name) => {
@@ -1032,6 +1068,21 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
         was created (the vlox palette only knows the registry it was fed). */
     knowsBlock(blockId) {
       return blockId === null || blockId === undefined || blockId === "air" || definedBlockIds.has(String(blockId));
+    },
+    /** Live server-authoritative block id for one cell (the physics mirror's
+        own view, `baseBlock` under the overlay). */
+    viewCell(x, y, z) {
+      return cellAt(x, y, z) || "air";
+    },
+    /** Cached light for one cell from the worker's light grids:
+        {v, sky, block}, or null while the section is unlit/unloaded. */
+    async lightAt(x, y, z) {
+      const r = await DVER.threads.world.runTaskAsync("light-probe", [x, y, z]);
+      // The task answers [cellLight, fullGrid, sectionOrigin, passState];
+      // [null] while the section is unloaded or unlit.
+      if (!Array.isArray(r) || typeof r[0] !== "number") return null;
+      const v = r[0];
+      return { v, sky: v & 0xf, block: (v >> 4) & 0xf };
     },
     /** Apply one server-authoritative edit to a single voxel. */
     async applyEdit(x, y, z, blockId) {

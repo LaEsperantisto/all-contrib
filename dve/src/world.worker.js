@@ -108,32 +108,37 @@ setInterval(() => {
 // registry calls transparent. Main sends that table once per join (a block
 // published in the Studio gets real light the moment it is placed).
 const lightLevel = new Map(); // true voxel id -> emitted light 0..15
-const lightThru = new Set();  // true voxel id -> light passes through
+const opaqueKnown = new Set(); // true voxel id -> registry says full cube (blocks light)
 let SUNK = 2;   // vlox: sun falls off twice as fast as block light
 const litBorder = new Map();  // section key -> checksum of its border values
 const seenSections = new Set(); // section keys the pass has filled at least once
 const lightQueue = new Set(); // section keys that need (re)computing
 let lightReady = false;
 
+// The payload lists every registered block and flags the ones that STOP light
+// (full cubes). Inverting the table makes the safe default structural: an id
+// the worker has never heard of lets light through, so a palette/registry
+// mismatch can only ever over-light a cell, never pitch-black a glass wall.
 Threads.registerTask("light-tables", rows => {
   lightLevel.clear();
-  lightThru.clear();
+  opaqueKnown.clear();
   for (const [name, level, thru] of rows) {
     let tid = 0;
     try { tid = VoxelLUT.voxelIds.getNumberId(name); } catch { /* palette mid-sync */ }
     if (!tid || tid < 0) continue;
     if (level > 0) lightLevel.set(tid, Math.min(15, level));
-    if (thru) lightThru.add(tid);
+    if (!thru) opaqueKnown.add(tid);
   }
   lightReady = true;
   litBorder.clear();
   seenSections.clear();
   lightQueue.clear();
-  return [lightLevel.size, lightThru.size];
+  return [lightLevel.size, opaqueKnown.size];
 });
 
-// Air and unknown ids let light through: only a registered full cube stops it.
-const thruId = tid => (tid === 0 ? true : lightThru.has(tid));
+// Air, registered transparent blocks, and unknown ids let light through: only
+// a registered full cube stops it.
+const thruId = tid => !opaqueKnown.has(tid);
 
 // The grid layout comes from vlox's own space tables, read when a section is
 // lit (they are configured with the world settings, not at module load). The
@@ -149,6 +154,7 @@ let sSky = null, sRgb = null, sThru = null, sQueue = null, sVol = 0;
 // re-baking the world out from under it.
 let lpCalls = 0, lpDone = 0, lpErr = "";
 let lpForce = false;   // set during light-fill so lightSection logs its seed census
+const lpDark = new Set(); // sections whose bake got zero seed sources (capped)
 const lpLog = [];   // one entry per distinct early-exit, for the state diagnostic
 function dims() {
   const s = WorldSpaces.section;
@@ -295,6 +301,11 @@ function lightSection(sec) {
       light[k] = sky[k] | (rgb[k] << 4) | (rgb[k] << 8) | (rgb[k] << 12);
     }
     lpLog.push("store:" + light[vi(0, D.y - 1, 0)] + "," + light[vi(D.x >> 1, D.y - 1, D.z >> 1)]);
+    // Diagnostics: sections that baked pitch dark, and why (was there an
+    // above-section, and what did its matching bottom-row cell carry?).
+    if (nseed === 0 && lpDark.size < 40) {
+      lpDark.add(key + ":" + (above ? (above.light ? "ab" + above.light[vi(D.x >> 1, 0, D.z >> 1)] : "ab-no-light") : "no-ab"));
+    }
   } catch (e) { lpErr = String(e && e.message || e).slice(0, 80); return false; }   // buffers detached mid-transfer
   // A border whose values changed has to hand its neighbours another pass, or
   // light never crosses the section line.
@@ -322,7 +333,7 @@ function lightPass(sectors) {
   const keys = [...lightQueue];
   let done = 0;
   for (const key of keys) {
-    if (done >= 24) { lightQueue.add(key); continue; }   // bound each pass; the rest wait
+    if (done >= 256) { lightQueue.add(key); continue; }   // bound each pass; the rest wait
     lightQueue.delete(key);
     const [x, y, z] = key.split(",").map(Number);
     const sec = sectionAt(x, y, z);
@@ -342,7 +353,11 @@ function lightPass(sectors) {
   // world at once starves the streaming pipeline. They are filled here rather
   // than queued: a section has to be filled once before its border checksum
   // means anything, and a queue that starts empty has no chance to notice.
-  let budget = 24;
+  // A bake itself is cheap (hundreds of frontier steps); the pacing protects
+  // the DISPLAY-tick storm, and the remesh pipeline coalesces those. Repro on
+  // the real world measured the old 24/round budget stalling at a ~2 000
+  // section backlog 100 s after joining: the surface stayed black forever.
+  let budget = 64;
   let skipped = 0;
   const fresh = new Set();
   for (const s of sectors) {
@@ -406,7 +421,7 @@ Threads.registerTask("light-cells", flat => {
 });
 
 // Diagnostics: how many sections have been lit and how many are still queued.
-const lightPassState = () => [litBorder.size, lightQueue.size, lpCalls, lpDone, lpErr, lightReady, lightLevel.size, lightThru.size, seenSections.size, lpLog.slice(-12)];
+const lightPassState = () => [litBorder.size, lightQueue.size, lpCalls, lpDone, lpErr, lightReady, lightLevel.size, opaqueKnown.size, seenSections.size, [...lpDark].slice(0, 8), lpLog.slice(-12)];
 Threads.registerTask("light-state", () => [lightPassState()]);
 // Diagnostics: fill specific sections on demand, so a probe can separate the
 // seeding/order from the streaming sweep.
@@ -462,10 +477,14 @@ Threads.registerTask("light-fill", cells => {
 Threads.registerTask("light-probe", ([x, y, z]) => {
   const sec = sectionAt(x, y, z);
   if (!sec || !sec.light) return [null];
-  const n = dims().v;
+  const D = dims();
+  const [ox, oy, oz] = sec.position;
+  const k = slot(D, x - ox, y - oy, z - oz);
   const out = [];
+  const n = D.v;
   for (let i = 0; i < n; i++) out.push(sec.light[i]);
-  return [[out, Array.from(sec.position), litBorder.size, lightQueue.size, lpCalls, lpDone, lpErr, lightReady, [...lightLevel.keys()].length, [...lightThru].length]];
+  // [cell value, full grid, section origin, pass state]
+  return [[sec.light[k], out, [ox, oy, oz], lightPassState()]];
 });
 
 

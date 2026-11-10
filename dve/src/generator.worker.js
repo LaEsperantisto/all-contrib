@@ -7,7 +7,7 @@ import { WorldSpaces } from "@divinevoxel/vlox/World/WorldSpaces";
 import { Threads } from "@amodx/threads";
 import { VoxelTagsRegister } from "@divinevoxel/vlox/Voxels/Data/VoxelTagsRegister";
 import { VoxelLUT } from "@divinevoxel/vlox/Voxels/Data/VoxelLUT";
-import { SLAB, baseBlock, voxelIdFor } from "./world.js";
+import { SLAB, baseBlock, voxelIdFor, shiftWindow } from "./world.js";
 import { healVoxelTags, installLUTSync } from "./lut-repair.js";
 
 // Diagnostics: count engine pipeline tasks on this thread, capture throws.
@@ -176,4 +176,26 @@ Threads.registerTask("reload-edits", async () => {
   const g = ACWorldGen.instance;
   await g.loadEdits();
   return [g.edits ? g.edits.size : 0];
+});
+
+// The client's window onto the infinite world moved under us (main.js fires
+// this whenever the 256-cell slab snaps to a new 16-cell origin): re-clip
+// generation to the new bounds and swap the edit mirror's snapshot to the
+// new window's rows. The mirror is at-least-as-fresh as the DB for cells it
+// still covers, so those carry over instead of racing the fetch.
+Threads.registerTask("shift-window", async ([ox, oz]) => {
+  if (!shiftWindow(ox, oz)) return [0];
+  const g = ACWorldGen.instance;
+  const carry = [];
+  if (g.edits) {
+    for (const [k, v] of g.edits) {
+      const p = k.split(",");
+      const x = +p[0], y = +p[1], z = +p[2];
+      if (x >= SLAB.X0 && x < SLAB.X1 && y >= SLAB.Y0 && y < SLAB.Y1 && z >= SLAB.Z0 && z < SLAB.Z1)
+        carry.push({ x, y, z, block_id: v });
+    }
+  }
+  g.pendingNotes.push(...carry);
+  await g.loadEdits();
+  return [carry.length];
 });

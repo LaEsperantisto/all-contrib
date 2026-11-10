@@ -64,6 +64,8 @@
 #crosshair::before,#crosshair::after{content:"";position:absolute;background:#f6efdf;mix-blend-mode:difference}
 #crosshair::before{left:50%;top:0;width:2px;height:100%;transform:translateX(-50%)}
 #crosshair::after{top:50%;left:0;height:2px;width:100%;transform:translateY(-50%)}
+#mine-bar{position:fixed;left:50%;top:calc(50% + 22px);width:120px;height:8px;transform:translateX(-50%);background:var(--paper2);border:2px solid var(--ink);border-radius:5px 4px 6px 4px;box-shadow:2px 2px 0 #2e251966;z-index:62;pointer-events:none}
+#mine-bar i{display:block;height:100%;width:0;background:var(--accent)}
 .hud-top{position:fixed;top:14px;left:14px;display:flex;gap:8px;z-index:62;pointer-events:none;flex-wrap:wrap;max-width:55vw}
 .hud-chip{font-family:"DM Mono",monospace;font-size:11px;color:var(--ink);background:var(--paper2);border:2px solid var(--ink);border-radius:9px 7px 10px 7px;padding:6px 10px;box-shadow:2px 2px 0 #2e251966}
 .hud-buttons{position:fixed;top:14px;right:14px;display:flex;gap:7px;z-index:62;flex-wrap:wrap;max-width:40vw}
@@ -186,6 +188,7 @@
 .script-area{width:100%;font-family:'DM Mono',monospace;font-size:11px;line-height:1.55;resize:vertical}
 .script-editor{width:100%;height:280px;border:1px solid var(--border,#333);border-radius:8px;overflow:hidden}
 .script-editor .monaco-editor{font-family:'DM Mono',monospace}
+.script-api{margin-top:10px;font-size:12px}.script-api summary{cursor:pointer;color:var(--accent-deep);font-weight:700}.api-table{width:100%;border-collapse:collapse;margin-top:6px}.api-table td{border:1px solid var(--border);padding:4px 8px;vertical-align:top;text-align:left}.api-sig{font-family:'DM Mono',monospace;white-space:nowrap}
 
 /* Scripted-block menu (E). */
 .interact-modal{max-width:330px}

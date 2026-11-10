@@ -14,6 +14,7 @@
   <div id="game" hidden>
     <canvas id="game-canvas"></canvas>
     <div id="crosshair" aria-hidden="true"></div>
+    <div id="mine-bar" hidden aria-hidden="true"><i></i></div>
     <div class="hud-top">
       <span id="hud-server" class="hud-chip">server: —</span>
       <span id="hud-coords" class="hud-chip">x 0 · y 0 · z 0</span>
@@ -232,10 +233,12 @@
           <p class="micro-note">Registry ID becomes <code id="block-id-preview">player:you:myns:starstone</code></p>
           <div class="form-row"><label>Hardness<input id="block-hardness" type="number" min="0" max="1000" step="0.1" value="2"></label><label>Light (0–15)<input id="block-light" type="number" min="0" max="15" value="0"></label></div>
           <div class="form-row"><label class="check"><input id="block-pass" type="checkbox"> Walk through (bodies ignore this block — crops, foliage)</label></div>
+          <div class="form-row"><label class="check"><input id="block-climb" type="checkbox"> Climbable (hold W on it to climb; needs Walk through)</label></div>
           <label>Colour<input id="block-colour" type="color" value="#8b72e8" class="colour-input"></label>
           <label>Behaviour <span class="optional">safe, declarative</span><select id="block-behaviour"><option value="solid">Solid</option><option value="transparent">Transparent</option><option value="glowing">Glowing</option><option value="decorative">Decorative</option><option value="useful">Useful</option></select></label>
           <div class="form-row">
-            <label>Support<select id="block-support"><option value="any" selected>Any empty cell</option><option value="solid">Needs solid below</option><option value="none">Needs empty below</option></select></label>
+            <label>Placement below<select id="block-below"><option value="any" selected>Any (no rule)</option><option value="whitelist">Only listed blocks</option><option value="blacklist">All except listed</option></select></label>
+            <label>Below IDs <span class="optional">comma-separated; “air” and “solid” are tokens</span><input id="block-below-ids" placeholder="builtin:dirt, builtin:farmland, air, …" autocomplete="off" spellcheck="false"></label>
             <label>Incompatible IDs <span class="optional">comma-separated; placement refuses next to these</span><input id="block-incompatible" placeholder="builtin:stone, …" autocomplete="off" spellcheck="false"></label>
           </div>
           <div class="form-row">
@@ -267,11 +270,15 @@
             </div>
             <label>Model <span class="optional">shape the renderer draws</span><select id="block-model"><option value="">Full cube (default)</option></select></label>
             <label>Script <span class="optional">Lua; runs on the Worker when a player presses E on this block</span>
-              <textarea id="block-script" class="script-area" rows="8" spellcheck="false" autocomplete="off" placeholder="-- on_interact() answers the player; on_choice(key) handles a menu pick.
--- Available: player, key, state_get(k), state_set(k,v), menu(title, options),
--- beam(colour), toast(message), log(message), plus math/string/table."></textarea>
+              <textarea id="block-script" class="script-area" rows="8" spellcheck="false" autocomplete="off" placeholder="-- on_interact(player) answers the press; on_choice(key, player) answers a menu pick.
+-- The full function table is right under the editor."></textarea>
             </label>
             <div id="block-script-editor" class="script-editor" hidden></div>
+            <p class="micro-note" id="block-editor-notice" hidden>Syntax editor unavailable — plain text mode.</p>
+            <details class="script-api" id="script-api">
+              <summary>Script functions</summary>
+              <table class="api-table"><tbody id="script-api-rows"></tbody></table>
+            </details>
           </div>
 
           <button class="button button-primary full" id="block-submit" type="submit">Publish block <span>＋</span></button>

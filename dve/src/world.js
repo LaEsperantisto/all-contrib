@@ -5,19 +5,43 @@
 // the authoritative twin — keep them integer-identical) and stores only
 // player edits. y GROWS UPWARD from the bedrock floor at y=0.
 
-// The prototype world is a walkable 256x256 column field, 32 tall — far
-// larger than vlox's generator radius budget (render 48 / gen 64 / max 80),
-// so only the area around the player exists: the generator focus follows the
-// player and chunks stream in and out as they walk (see world.worker.js
-// "move-generator").
+// The world is infinite: the server accepts x/z to ±1,000,000 and base
+// terrain is pure functions of (x,z) everywhere. What the client holds is a
+// MOVING WINDOW — a 256-cell slab that follows the player in 16-cell steps —
+// and far larger than vlox's generator radius budget (render 48 / gen 64 /
+// max 80), so within the window only the area around the player exists: the
+// generator focus follows the player and chunks stream in and out as they
+// walk (see world.worker.js "move-generator"). Every importer reads the same
+// SLAB object; shiftWindow mutates its four bounds and nobody else has to
+// know the world moved.
 export const SLAB = {
   X0: -128,
   X1: 128, // exclusive
   Y0: 0,
-  Y1: 32, // exclusive
+  Y1: 64, // exclusive
   Z0: -128,
   Z1: 128, // exclusive
 };
+export const WINDOW = { ox: -128, oz: -128, span: 256 };
+
+// Snap the window so its left/near edge sits generationRadius (96) behind
+// the player: the active ring is always fully inside it, and the far margin
+// (256-96=160) keeps it inside while the player walks forward.
+export function windowOriginFor(px, pz) {
+  return [16 * Math.floor(px / 16) - 96, 16 * Math.floor(pz / 16) - 96];
+}
+
+// Returns true when the window actually moved.
+export function shiftWindow(ox, oz) {
+  if (ox === WINDOW.ox && oz === WINDOW.oz) return false;
+  WINDOW.ox = ox;
+  WINDOW.oz = oz;
+  SLAB.X0 = ox;
+  SLAB.X1 = ox + WINDOW.span;
+  SLAB.Z0 = oz;
+  SLAB.Z1 = oz + WINDOW.span;
+  return true;
+}
 
 export const SEA_LEVEL = 10; // columns with heightAt < this flood up to y=SEA_LEVEL
 
