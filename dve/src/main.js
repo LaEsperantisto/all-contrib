@@ -217,7 +217,9 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     if (by < SLAB.Y0 || by >= SLAB.Y1) return false;
     const id = cellAt(bx, by, bz);
     // Water fills cells but is not solid: you walk through it and sink.
-    return id !== undefined && id !== null && id !== "air" && id !== "builtin:water";
+    // Pass-through blocks (crops) are the same story for bodies: visible,
+    // targetable, but the AABB never collides with them.
+    return id !== undefined && id !== null && id !== "air" && id !== "builtin:water" && !passThru.has(id);
   };
   const bodyBlocked = (x, feetY, z) => {
     const x0 = Math.floor(x - HALF), x1 = Math.floor(x + HALF);
@@ -326,6 +328,10 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
   // shadowing a lit block's own faces), and light travels through anything that
   // is not an opaque cube — air and blocks that drew with a transparent model.
   const seeThru = new Set(["dve_air"]);
+  // Solidity is a separate axis from render mode: `behaviour` says how a block
+  // draws, `pass_through` says bodies ignore it. Crops are both transparent
+  // AND pass-through; glass is only transparent.
+  const passThru = new Set();
   const emits = new Map(); // voxel id -> light level from the registry
   // Every block id this view can actually paint: the vlox palette only knows
   // what this feed defined, and an edit for anything else throws deep in the
@@ -386,6 +392,9 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     // Light stops at a full cube — unless the block says it is transparent,
     // which is the Studio's own word for "you can see through this".
     if (b.behaviour === "transparent" || !OPAQUE_MODELS.has(model)) seeThru.add(vid);
+    // Physics reads the live cell mirror, which speaks raw block IDs ("builtin:wheat_1"),
+    // not palette voxel IDs — the pass-through set must use the same space.
+    if (b.pass_through) passThru.add(b.id);
   }
 
   // ---- Glow layer ------------------------------------------------------------

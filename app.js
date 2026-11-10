@@ -883,7 +883,7 @@ const pendingDelete=new Set();
 $("block-form").addEventListener("submit",async e=>{
   e.preventDefault();if(!authenticated){openAuth("login");toast("Log in to publish a block.");return;}
   const rules={support:$("block-support").value,incompatibleWith:$("block-incompatible").value.split(",").map(x=>x.trim().toLowerCase()).filter(Boolean)};
-  const common={name:$("block-name").value,hardness:Number($("block-hardness").value),light:Number($("block-light").value),colour:$("block-colour").value,behaviour:$("block-behaviour").value,rules,
+  const common={name:$("block-name").value,hardness:Number($("block-hardness").value),light:Number($("block-light").value),colour:$("block-colour").value,behaviour:$("block-behaviour").value,pass_through:$("block-pass").checked,rules,
     texture:blockTextureField.value(),texture_top:blockTextureTopField.value(),texture_bottom:blockTextureBottomField.value(),model:$("block-model").value||null,script:scriptValue().trim()||null,
     drop_item_id:$("block-drop-item").value||null,drop_qty:Number($("block-drop-qty").value)||1};
   try{
@@ -894,7 +894,7 @@ $("block-form").addEventListener("submit",async e=>{
     }else{
       await api("/api/blocks",{method:"POST",body:JSON.stringify({...common,namespace:$("block-namespace").value,id:$("block-id").value})});
       toast("Block published to the registry. It becomes placeable immediately; textures reload on next visit.");
-      e.target.reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";resetBlockAppearance();updateIdPreview();$("block-drop-item").value="";$("block-drop-qty").value=1;
+      e.target.reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";$("block-pass").checked=false;resetBlockAppearance();updateIdPreview();$("block-drop-item").value="";$("block-drop-qty").value=1;
     }
     await refreshRegistry();
   }
@@ -908,7 +908,7 @@ function enterEditMode(block){
   const localId=block.id.startsWith("player:")?parts.slice(3).join(":"):block.id;
   const rules=block.rules&&typeof block.rules==="object"?block.rules:{};
   $("block-name").value=block.name;$("block-namespace").value=namespace;$("block-id").value=localId;
-  $("block-hardness").value=block.hardness;$("block-light").value=block.light;$("block-colour").value=block.colour;
+  $("block-hardness").value=block.hardness;$("block-light").value=block.light;$("block-colour").value=block.colour;$("block-pass").checked=!!block.pass_through;
   $("block-behaviour").value=block.behaviour;$("block-support").value=rules.support||"solid";
   $("block-incompatible").value=(rules.incompatibleWith||[]).join(", ");
   blockTextureField.set(block.texture||null);
@@ -928,7 +928,7 @@ function exitEditMode(){
   $("block-edit-note").hidden=true;
   $("block-form-title").textContent="Block workshop";$("block-form-sub").textContent="Design a new block";
   $("block-submit").innerHTML='Publish block <span>＋</span>';
-  $("block-form").reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";resetBlockAppearance();updateIdPreview();
+  $("block-form").reset();$("block-hardness").value=2;$("block-light").value=0;$("block-colour").value="#8b72e8";$("block-pass").checked=false;resetBlockAppearance();updateIdPreview();
 }
 // Live registry-ID preview: player:USERNAME:NAMESPACE:BLOCKNAME.
 function updateIdPreview(){
