@@ -111,6 +111,7 @@ $("mm-server-list").addEventListener("change", () => {
   settings.serverId = $("mm-server-list").value;
   pendingServerDelete = null;
   saveSettings();
+  liveReconnect();  // the pose socket is baked to a world at dial; it must follow the picker
   renderServerPicker();
 });
 $("mm-server-create").addEventListener("click", () => {
@@ -133,6 +134,7 @@ $("cs-create").addEventListener("click", async () => {
   $("create-server").close();
   settings.serverId = r.server.id;
   saveSettings();
+  liveReconnect();
   await refreshServers();
   toast(`Created “${r.server.name}”. Join when you are ready.`);
 });
@@ -146,6 +148,7 @@ $("mm-server-delete").addEventListener("click", async () => {
   pendingServerDelete = null;
   settings.serverId = "global";
   saveSettings();
+  liveReconnect();
   await refreshServers();
   toast("Server deleted — its world is gone.");
 });
@@ -1878,6 +1881,7 @@ async function boot(){
         toast(err.message === "lan" ? "That world only lets devices on its local network in — back to the global world." : "That world is private to the device that made it — back to the global world.", true);
         settings.serverId = "global";
         saveSettings();
+        liveReconnect();
         renderServerPicker();
         try {
           await refreshRegistry();

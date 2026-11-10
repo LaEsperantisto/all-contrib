@@ -1114,6 +1114,27 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
       const r = remotes.get(name);
       if (r) { r.root.dispose(false, true); remotes.delete(name); }
     },
+    /**
+     * Which others this session currently sees in the world (roster + pose
+     * frames — exactly what the presence machinery knows); proof and the
+     * player list use this.
+     */
+    remoteNames() { return [...remotes.keys()]; },
+    /** Where a remote avatar is actually rendered (the smoothed root), or null. */
+    remotePose(name) {
+      const r = remotes.get(String(name ?? ""));
+      return r ? { x: r.root.position.x, y: r.root.position.y, z: r.root.position.z } : null;
+    },
+    /** The live material colours painted on a remote avatar, same shape as selfLookHexes. */
+    remoteLook(name) {
+      const r = remotes.get(String(name ?? ""));
+      if (!r) return null;
+      return r.parts.filter(p => p.key).map(p => ({
+        key: p.key,
+        diffuse: p.mat.diffuseColor.toHexString().toLowerCase(),
+        emissive: p.mat.emissiveColor.toHexString().toLowerCase(),
+      }));
+    },
 
     /** One entry from a WorldLive mob snapshot (y = feet on the surface). */
     setMob(id, kind, x, y, z, yaw, hostile, hp) {
