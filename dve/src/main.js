@@ -280,8 +280,14 @@ export async function createDVEView(canvas, blocks, apiBase, opts = {}) {
     if (keys.has("KeyS")) mz -= 1;
     if (keys.has("KeyA")) mx -= 1;
     if (keys.has("KeyD")) mx += 1;
+    // On a climbable, W is the CLIMB input, not a forward step: keeping the
+    // forward walk component would carry the body out of the one-cell-wide
+    // ladder, contact would break, and the climb would drop. A/D strafe and
+    // S back away normally — walking off a ladder still drops you.
+    const climbNow = climbContact();
+    const walk = climbNow ? Math.min(mz, 0) : mz;
     let dx = 0, dz = 0;
-    if (mz) { dx += Math.sin(yaw) * mz * speed * dt; dz += Math.cos(yaw) * mz * speed * dt; }
+    if (walk) { dx += Math.sin(yaw) * walk * speed * dt; dz += Math.cos(yaw) * walk * speed * dt; }
     if (mx) { dx += Math.cos(yaw) * mx * speed * dt; dz += -Math.sin(yaw) * mx * speed * dt; }
 
     // Axis-wise AABB resolution against the voxel grid: slide along walls,
