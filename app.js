@@ -377,7 +377,7 @@ $("death-respawn").addEventListener("click",async()=>{
     hideDeath();
     if(dveView&&data.state)dveView.setPose(data.state);
     renderHealth();
-    if(dveView)dveView.grabPointer().catch(()=>{}); // best-effort: needs a gesture, fine to skip
+    if(dveView)dveView.grabPointer(); // best-effort: needs a gesture, fine to skip (the engine swallows refusals)
     toast("Respawned — the world is unkind, try again.");
   }catch(err){toast(err.message,true);}
 });
@@ -1398,7 +1398,7 @@ document.querySelectorAll("dialog").forEach(d=>d.addEventListener("close",()=>{
   // Exiting any menu back into the game re-grabs the cursor (best effort:
   // Chrome may refuse right after an Esc-exit — the HUD button covers it).
   // Never while dead: the corpse keeps the cursor free for the death screen.
-  if(dveView&&!document.querySelector("dialog[open]")&&$("death-screen").hidden)dveView.grabPointer().catch(()=>{}); // re-grab without a gesture usually rejects — that's fine
+  if(dveView&&!document.querySelector("dialog[open]")&&$("death-screen").hidden)dveView.grabPointer(); // re-grab without a gesture usually refuses — the engine swallows it
 }));
 
 // Cursor-grab button: visible only while the game is up and the cursor is
@@ -1414,7 +1414,7 @@ document.addEventListener("pointerlockchange",()=>{
   if(!document.pointerLockElement&&dveView&&!$("game").hidden&&$("death-screen").hidden&&!document.querySelector("dialog[open]"))openPause();
 });
 setInterval(syncGrabBtn,500);
-grabBtn.addEventListener("click",()=>{if(dveView)dveView.grabPointer().catch(()=>{});});
+grabBtn.addEventListener("click",()=>{if(dveView)dveView.grabPointer();});
 
 // ---- Shared world: server-authoritative 3D edit state --------------------------
 // Base terrain is generated identically by the server and the DVE terrain
@@ -2006,7 +2006,7 @@ async function boot(){
     if (dveView) {           // returning from the game to the menu and back
       if (settings.serverId === joinedServerId) {
         dveView.resize();
-        dveView.grabPointer().catch(() => {});
+        dveView.grabPointer();
         return;
       }
       // A different world: the running engine — its generator worker (born
@@ -2034,7 +2034,7 @@ async function boot(){
       await refreshRegistry();      // textures come from the block registry
       await loadWorldAll();         // player edits made before this session
       await initGameView();
-      dveView.grabPointer().catch(() => {}); // cursor goes to the game (user gesture — usually sticks)
+      dveView.grabPointer(); // cursor goes to the game (user gesture — usually sticks; refusals swallowed in the engine)
     } catch (err) {
       // A private or LAN world answers 403 when this device does not qualify;
       // say which and fall back to the shared world instead of an empty one.
@@ -2048,7 +2048,7 @@ async function boot(){
           await refreshRegistry();
           await loadWorldAll();
           await initGameView();
-          dveView.grabPointer().catch(() => {});
+          dveView.grabPointer();
           return;
         } catch { /* the shared world failed too */ }
       }
